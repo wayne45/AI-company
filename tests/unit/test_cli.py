@@ -21,7 +21,7 @@ class TestVersion:
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
         assert "AI Team OS" in result.output
-        assert "1.3.0" in result.output
+        assert "1.3.1" in result.output
 
     def test_version_short_flag(self) -> None:
         """`aiteam -v` 同样输出版本号."""

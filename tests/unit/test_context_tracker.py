@@ -87,6 +87,35 @@ class TestContextTracker:
         assert "CONTEXT WARNING" in out
         transcript.unlink()
 
+    def test_1m_without_suffix_high_tokens(self):
+        # 684800 tokens with model='claude-opus-4-6' (no [1m] suffix) -> auto-detect 1M -> 68.5% no warning
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 684_800}, "model": "claude-opus-4-6"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert out.strip() == ""
+        assert "342" not in out
+        transcript.unlink()
+
+    def test_200k_critical_not_1m(self):
+        # 180K tokens + sonnet model -> should be 200K context -> 90% critical
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-sonnet-4-6"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert "CONTEXT CRITICAL" in out
+        assert "200000" in out
+        transcript.unlink()
+
+    def test_250k_tokens_auto_upgrade_to_1m(self):
+        # 250K tokens > 200K -> must be 1M -> 25% no warning
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 250_000}, "model": "claude-opus-4-6"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert out.strip() == ""
+        transcript.unlink()
+
     def test_missing_transcript_path(self):
         out, _ = _run_hook({})
         assert out.strip() == ""

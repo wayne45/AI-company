@@ -3,6 +3,11 @@
 AI Team OS 的所有重要变更均记录在此文件中。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)
 
+## [1.3.1] — 2026-04-13
+
+### 修复
+- **Hotfix: context_tracker 1M context window 检测** — transcript 中 model 字段为 `claude-opus-4-6`（无 `[1m]` 后缀），导致 1M context session 被误判为 200K，出现 342% 等异常百分比。新增 token 数量 fallback：若 `used_tokens > 200K`，自动识别为 1M context window。
+
 ## [1.3.0] — 2026-04-13
 
 ### 新增

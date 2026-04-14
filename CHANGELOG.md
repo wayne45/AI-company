@@ -3,6 +3,11 @@
 All notable changes to AI Team OS will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.3.1] — 2026-04-13
+
+### Fixed
+- **Hotfix: context_tracker 1M context window detection** — Transcripts record model as `claude-opus-4-6` without the `[1m]` suffix, causing 1M-context sessions to be treated as 200K and report absurd percentages (e.g. 342%). Added token-count fallback: if `used_tokens > 200K`, auto-detect as 1M context window.
+
 ## [1.3.0] — 2026-04-13
 
 ### Added

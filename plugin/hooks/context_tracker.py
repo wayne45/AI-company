@@ -14,16 +14,26 @@ import sys
 from pathlib import Path
 
 DEFAULT_CONTEXT_SIZE = 200_000
+LARGE_CONTEXT_SIZE = 1_000_000
 
 
-def _detect_context_size(model: str) -> int:
-    """Infer context window size from model identifier."""
-    if not model:
-        return DEFAULT_CONTEXT_SIZE
-    model_lower = model.lower()
-    if "1m" in model_lower or "[1m]" in model_lower:
-        return 1_000_000
-    return DEFAULT_CONTEXT_SIZE
+def _compute_used_pct(total_tokens: int, model: str) -> tuple[float, int]:
+    """Compute used percentage and detect context window size.
+
+    Strategy:
+    1. If model string explicitly mentions 1m -> use 1M
+    2. If total_tokens > 200K -> must be 1M (can't fit in 200K window)
+    3. Otherwise default to 200K
+    """
+    ctx_size = DEFAULT_CONTEXT_SIZE
+    if model:
+        ml = model.lower()
+        if "1m" in ml or "1000000" in ml:
+            ctx_size = LARGE_CONTEXT_SIZE
+    if total_tokens > DEFAULT_CONTEXT_SIZE:
+        ctx_size = LARGE_CONTEXT_SIZE
+    pct = round((total_tokens / ctx_size) * 100, 1)
+    return pct, ctx_size
 
 
 def _read_last_usage(transcript: Path) -> tuple[int, str] | None:
@@ -90,8 +100,7 @@ def main():
         return
     used_tokens, model = result
 
-    ctx_size = _detect_context_size(model)
-    pct = round((used_tokens / ctx_size) * 100, 1)
+    pct, ctx_size = _compute_used_pct(used_tokens, model)
 
     if pct >= 90:
         print(
