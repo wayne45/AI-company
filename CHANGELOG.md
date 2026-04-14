@@ -3,6 +3,16 @@
 All notable changes to AI Team OS will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.3.4] — 2026-04-14
+
+### Fixed
+- **Critical: `meeting_send_message` 500 on databases upgraded from <1.3.0** — The 1.3.3 `_sqlite_migrate()` added `meetings.meta_json` but omitted `meeting_messages.metadata_json`. Any database created before that column was added to the ORM model would raise `OperationalError` on every `INSERT`/`SELECT` against `meeting_messages`. Fixed by refactoring `_sqlite_migrate()` into a data-driven loop over `COLUMNS_TO_ENSURE`, which also covers `meetings.meta_json`. All entries are idempotent (guarded by `PRAGMA table_info`).
+- **Migration framework now data-driven** — future schema additions require only a one-line append to `COLUMNS_TO_ENSURE`.
+
+**关键修复：升级自 1.3.0 之前版本的数据库上 `meeting_send_message` 500**
+- 1.3.3 的 `_sqlite_migrate()` 补了 `meetings.meta_json`，但漏掉了 `meeting_messages.metadata_json`，导致老数据库上所有会议消息的 INSERT/SELECT 报 `OperationalError`。
+- 修复方案：将 `_sqlite_migrate()` 重构为数据驱动循环，通过 `COLUMNS_TO_ENSURE` 列表管理所有需补列，未来新增列只需 append 一行。
+
 ## [1.3.3] — 2026-04-14
 
 ### Fixed

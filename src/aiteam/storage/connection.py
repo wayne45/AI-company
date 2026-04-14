@@ -104,20 +104,35 @@ async def get_session(
             raise
 
 
+COLUMNS_TO_ENSURE: list[tuple[str, str, str]] = [
+    ("meetings", "meta_json", "JSON DEFAULT NULL"),
+    ("meeting_messages", "metadata_json", "JSON DEFAULT NULL"),
+]
+
+
+def _column_exists(con: object, table: str, column: str) -> bool:
+    """Return True if *column* exists in *table* (uses PRAGMA table_info)."""
+    import sqlite3
+
+    rows = con.execute(f"PRAGMA table_info({table})")  # type: ignore[union-attr]
+    return any(row[1] == column for row in rows)
+
+
 def _sqlite_migrate(db_path: str) -> None:
     """Idempotent schema migrations for SQLite DBs using stdlib sqlite3.
 
     SQLAlchemy create_all only creates missing tables, not missing columns.
-    Each ALTER here is guarded by PRAGMA table_info so it is safe to rerun.
+    Each entry in COLUMNS_TO_ENSURE is checked via PRAGMA table_info and
+    ALTER TABLE'd only when absent, making all runs safe to repeat.
     """
     import sqlite3
 
     con = sqlite3.connect(db_path)
     try:
-        cols = {row[1] for row in con.execute("PRAGMA table_info(meetings)")}
-        if "meta_json" not in cols:
-            con.execute("ALTER TABLE meetings ADD COLUMN meta_json JSON DEFAULT NULL")
-            con.commit()
+        for table, col, ddl in COLUMNS_TO_ENSURE:
+            if not _column_exists(con, table, col):
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                con.commit()
     finally:
         con.close()
 
