@@ -3,6 +3,11 @@
 All notable changes to AI Team OS will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.3.2] — 2026-04-14
+
+### Fixed
+- **Critical: MCP auto port discovery broken** — `plugin/.mcp.json` hardcoded `AITEAM_API_URL=http://localhost:8000` as an env var, which overrode the dynamic port fallback in `_get_api_url()`. When autostart picked a free port (e.g. 59711) because 8000 was occupied, MCP tools still tried port 8000 and reported `unhealthy`, while hooks (using the same `_get_api_url()` code path) worked correctly. Removed the env var from plugin config, root `.mcp.json`, and all install scripts so MCP now falls back to reading `api_port.txt` dynamically. User-provided `AITEAM_API_URL` env still takes priority (for remote API use cases).
+
 ## [1.3.1] — 2026-04-13
 
 ### Fixed

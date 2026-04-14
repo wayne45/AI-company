@@ -199,9 +199,6 @@ def register_global_mcp(project_root: Path) -> None:
     mcp_entry = {
         "command": sys.executable,
         "args": ["-m", "aiteam.mcp.server"],
-        "env": {
-            "AITEAM_API_URL": "http://localhost:8000",
-        },
     }
 
     # Method 1: Try CLI command (most reliable)
@@ -261,9 +258,6 @@ def _write_project_mcp_json(project_root: Path) -> None:
                 "command": "python",
                 "args": ["-m", "aiteam.mcp.server"],
                 "cwd": str(project_root).replace("\\", "/"),
-                "env": {
-                    "AITEAM_API_URL": "http://localhost:8000",
-                },
             }
         }
     }

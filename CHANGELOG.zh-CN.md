@@ -3,6 +3,11 @@
 AI Team OS 的所有重要变更均记录在此文件中。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)
 
+## [1.3.2] — 2026-04-14
+
+### 修复
+- **紧急：MCP 动态端口发现失效** — `plugin/.mcp.json` 把 `AITEAM_API_URL=http://localhost:8000` 硬编码为 env var，覆盖了 `_get_api_url()` 中的动态端口 fallback。当 autostart 因 8000 被占用而选择空闲端口（如 59711）时，MCP 工具仍连接 8000 并报告 `unhealthy`，而 hook 走同一代码路径却正常工作。现已从 plugin 配置、根目录 `.mcp.json` 及所有安装脚本中删除该 env var，MCP 现在正确回退到读取 `api_port.txt` 动态发现端口。用户手动设置的 `AITEAM_API_URL` 仍具最高优先级（用于远程 API 场景）。
+
 ## [1.3.1] — 2026-04-13
 
 ### 修复

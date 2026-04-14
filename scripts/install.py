@@ -202,7 +202,6 @@ def install_mcp(settings: dict, project_root: Path) -> None:
     mcp_entry = {
         "command": PYTHON_EXE,
         "args": ["-m", "aiteam.mcp.server"],
-        "env": {"AITEAM_API_URL": "http://localhost:8000"},
     }
 
     # 2a. Write to settings.json (for current-project sessions)
