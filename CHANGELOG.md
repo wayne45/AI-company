@@ -9,22 +9,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 - **Critical: `meeting_send_message` 500 on databases upgraded from <1.3.0** — The 1.3.3 `_sqlite_migrate()` added `meetings.meta_json` but omitted `meeting_messages.metadata_json`. Any database created before that column was added to the ORM model would raise `OperationalError` on every `INSERT`/`SELECT` against `meeting_messages`. Fixed by refactoring `_sqlite_migrate()` into a data-driven loop over `COLUMNS_TO_ENSURE`, which also covers `meetings.meta_json`. All entries are idempotent (guarded by `PRAGMA table_info`).
 - **Migration framework now data-driven** — future schema additions require only a one-line append to `COLUMNS_TO_ENSURE`.
 
-**关键修复：升级自 1.3.0 之前版本的数据库上 `meeting_send_message` 500**
-- 1.3.3 的 `_sqlite_migrate()` 补了 `meetings.meta_json`，但漏掉了 `meeting_messages.metadata_json`，导致老数据库上所有会议消息的 INSERT/SELECT 报 `OperationalError`。
-- 修复方案：将 `_sqlite_migrate()` 重构为数据驱动循环，通过 `COLUMNS_TO_ENSURE` 列表管理所有需补列，未来新增列只需 append 一行。
-
 ## [1.3.3] — 2026-04-14
 
 ### Fixed
-- **Critical: `meeting_create` API 500 when called from external projects** — Two root causes fixed:
+- **Critical: `meeting_create` API 500 when called from external projects** — Three root causes fixed:
   1. **Missing `meta_json` column** — The `meetings` table lacked the `meta_json` column on databases created before this field was added to the ORM model. `init_db` uses `create_all` which does not add new columns to existing tables. Added an idempotent SQLite migration in `connection.py` that runs at startup and safely `ALTER TABLE`s the column if absent.
   2. **Team ID not resolved by name** — The `POST /api/teams/{team_id}/meetings` route accepted team names (e.g. `"repo-insight-build"`) but passed them straight to the repository without UUID resolution, causing downstream queries to silently fail. Route now tries UUID lookup first, then falls back to name lookup, returning HTTP 404 if neither matches.
   3. **Unhandled ORM exception caused worker hang** — Added `try/except` around `create_meeting` call so DB errors surface as HTTP 500 JSON instead of leaving the worker stuck.
-
-**关键修复 `meeting_create` 500（外部项目调用时崩溃）**
-1. **`meta_json` 列缺失** — 旧数据库 `meetings` 表没有该列，`create_all` 不补列，INSERT 报 `OperationalError`。启动时新增幂等 migration，缺列则 `ALTER TABLE` 补全。
-2. **team_id 未按名称解析** — 路由接收团队名但未转 UUID，直接存入导致查询失败。现在先按 UUID 查，再按 name 查，都找不到返回 404。
-3. **ORM 异常未捕获导致 worker 假卡** — 路由加 `try/except`，DB 错误以 HTTP 500 JSON 返回。
 
 ## [1.3.2] — 2026-04-14
 

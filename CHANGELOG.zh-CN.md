@@ -3,6 +3,20 @@
 AI Team OS 的所有重要变更均记录在此文件中。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)
 
+## [1.3.4] — 2026-04-14
+
+### 修复
+- **紧急：升级自 1.3.0 之前版本的数据库上 `meeting_send_message` 500** — 1.3.3 的 `_sqlite_migrate()` 补了 `meetings.meta_json`，但漏掉了 `meeting_messages.metadata_json`。老数据库（在该字段加入 ORM 模型前创建）上的所有 `meeting_messages` INSERT/SELECT 都会抛 `OperationalError`。修复方案：将 `_sqlite_migrate()` 重构为数据驱动循环，统一遍历 `COLUMNS_TO_ENSURE` 列表（同时覆盖 `meetings.meta_json`）。所有迁移项均通过 `PRAGMA table_info` 保护，幂等安全。
+- **迁移框架改为数据驱动** — 未来新增字段只需在 `COLUMNS_TO_ENSURE` 列表 append 一行。
+
+## [1.3.3] — 2026-04-14
+
+### 修复
+- **紧急：外部项目调用 `meeting_create` API 崩溃 500** — 三个根因一次修复：
+  1. **`meta_json` 列缺失** — 旧数据库 `meetings` 表没有该列（该字段加入 ORM 模型前创建的库），`init_db` 用 `create_all` 不会为已存在表补列，INSERT 直接报 `OperationalError`。新增 `connection.py` 启动时幂等 SQLite 迁移，缺列则 `ALTER TABLE` 补全。
+  2. **team_id 未按名称解析** — `POST /api/teams/{team_id}/meetings` 路由接收团队名（如 `"repo-insight-build"`）但未转 UUID，直接传给仓储层导致后续查询静默失败。路由现在先按 UUID 查、再按 name 查，都找不到返回 HTTP 404。
+  3. **ORM 异常未捕获导致 worker 假卡** — `create_meeting` 调用外围加 `try/except`，DB 错误以 HTTP 500 JSON 返回，不再让 worker 卡死。
+
 ## [1.3.2] — 2026-04-14
 
 ### 修复
