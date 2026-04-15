@@ -15,6 +15,27 @@ from pathlib import Path
 
 DEFAULT_CONTEXT_SIZE = 200_000
 LARGE_CONTEXT_SIZE = 1_000_000
+_CLAUDE_CONFIG = Path.home() / ".claude.json"
+
+
+def _claude_config_has_1m_variant(model: str) -> bool:
+    """Check ~/.claude.json for a `{model}[1m]` usage/cost entry.
+
+    CC strips the `[1m]` suffix from transcript `model` fields, so the transcript
+    alone can't tell us whether a session runs in 1M mode. But ~/.claude.json
+    persists per-model usage keyed by the full ID including `[1m]`, so its
+    presence is strong evidence the machine uses the 1M variant for this model.
+    """
+    if not model:
+        return False
+    try:
+        if not _CLAUDE_CONFIG.is_file():
+            return False
+        marker = f'{model}[1m]'.encode("utf-8")
+        with open(_CLAUDE_CONFIG, "rb") as f:
+            return marker in f.read()
+    except OSError:
+        return False
 
 
 def _compute_used_pct(total_tokens: int, model: str) -> tuple[float, int]:
@@ -22,14 +43,18 @@ def _compute_used_pct(total_tokens: int, model: str) -> tuple[float, int]:
 
     Strategy:
     1. If model string explicitly mentions 1m -> use 1M
-    2. If total_tokens > 200K -> must be 1M (can't fit in 200K window)
-    3. Otherwise default to 200K
+    2. If ~/.claude.json records a `{model}[1m]` usage entry -> use 1M
+       (transcript strips the suffix; config file preserves it)
+    3. If total_tokens > 200K -> must be 1M (can't fit in 200K window)
+    4. Otherwise default to 200K
     """
     ctx_size = DEFAULT_CONTEXT_SIZE
     if model:
         ml = model.lower()
         if "1m" in ml or "1000000" in ml:
             ctx_size = LARGE_CONTEXT_SIZE
+    if ctx_size == DEFAULT_CONTEXT_SIZE and _claude_config_has_1m_variant(model):
+        ctx_size = LARGE_CONTEXT_SIZE
     if total_tokens > DEFAULT_CONTEXT_SIZE:
         ctx_size = LARGE_CONTEXT_SIZE
     pct = round((total_tokens / ctx_size) * 100, 1)
