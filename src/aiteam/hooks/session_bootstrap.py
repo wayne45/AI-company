@@ -23,6 +23,27 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 _PORT_FILE = os.path.join(os.path.expanduser("~"), ".claude", "data", "ai-team-os", "api_port.txt")
+_SUBAGENT_MARKER_DIR = os.path.join(
+    os.path.expanduser("~"), ".claude", "data", "ai-team-os", "subagent_sessions"
+)
+_SUBAGENT_MARKER_TTL_SECONDS = 24 * 3600
+
+
+def _cleanup_stale_subagent_markers() -> None:
+    """Delete sub-agent session markers older than 24h (best-effort, silent)."""
+    try:
+        if not os.path.isdir(_SUBAGENT_MARKER_DIR):
+            return
+        cutoff = time.time() - _SUBAGENT_MARKER_TTL_SECONDS
+        for name in os.listdir(_SUBAGENT_MARKER_DIR):
+            path = os.path.join(_SUBAGENT_MARKER_DIR, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 def _get_api_url() -> str:
@@ -567,6 +588,8 @@ def main() -> None:
         session_info = json.loads(raw) if raw.strip() else {}
     except Exception:
         session_info = {}
+
+    _cleanup_stale_subagent_markers()
 
     # Check if API is reachable (1 retry with short sleep — keeps us under 3s hook timeout)
     health = _api_get("/api/teams")

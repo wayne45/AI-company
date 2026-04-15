@@ -17,6 +17,17 @@ from pathlib import Path
 _SUPERVISOR_STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "data", "ai-team-os")
 _SUPERVISOR_STATE_FILE = os.path.join(_SUPERVISOR_STATE_DIR, "supervisor-state.json")
 _PORT_FILE = os.path.join(_SUPERVISOR_STATE_DIR, "api_port.txt")
+_SUBAGENT_MARKER_DIR = os.path.join(_SUPERVISOR_STATE_DIR, "subagent_sessions")
+
+
+def _is_subagent_session(session_id: str) -> bool:
+    """Return True if the given session was marked as a sub-agent by SubagentStart."""
+    if not session_id:
+        return False
+    try:
+        return os.path.isfile(os.path.join(_SUBAGENT_MARKER_DIR, session_id))
+    except Exception:
+        return False
 
 
 def _get_api_url() -> str:
@@ -280,9 +291,14 @@ def _check_leader_doing_too_much(event_data: dict, state: dict) -> str | None:
 
     Returns warning text when consecutive non-delegation tool calls exceed threshold.
     Resets counter when Leader calls Agent/TeamCreate/SendMessage.
+    Skipped for sub-agent sessions (marked by SubagentStart hook) — hands-on work
+    is their job, not a delegation failure.
     """
     tool_name = event_data.get("tool_name", "")
     if not tool_name:
+        return None
+
+    if _is_subagent_session(event_data.get("session_id", "")):
         return None
 
     consecutive = state.get("leader_consecutive_calls", 0)

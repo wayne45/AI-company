@@ -11,6 +11,22 @@ import urllib.error
 import urllib.request
 
 _PORT_FILE = os.path.join(os.path.expanduser("~"), ".claude", "data", "ai-team-os", "api_port.txt")
+_SUBAGENT_MARKER_DIR = os.path.join(
+    os.path.expanduser("~"), ".claude", "data", "ai-team-os", "subagent_sessions"
+)
+
+
+def _mark_subagent_session(session_id: str) -> None:
+    """Touch a marker file so workflow_reminder can skip Leader checks for this session."""
+    if not session_id:
+        return
+    try:
+        os.makedirs(_SUBAGENT_MARKER_DIR, exist_ok=True)
+        marker = os.path.join(_SUBAGENT_MARKER_DIR, session_id)
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
 
 
 def _get_api_url() -> str:
@@ -169,9 +185,11 @@ def main():
         raw = sys.stdin.buffer.read().decode("utf-8")
         if not raw.strip():
             return
-        json.loads(raw)
+        payload = json.loads(raw)
     except Exception:
         return
+
+    _mark_subagent_session(payload.get("session_id", ""))
 
     # Build injection content
     lines = []
