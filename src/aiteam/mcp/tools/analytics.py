@@ -12,36 +12,6 @@ def register(mcp):
     """Register all analytics-related MCP tools."""
 
     @mcp.tool()
-    def token_costs(group_by: str = "agent", days: int = 7) -> dict[str, Any]:
-        """Query token consumption and cost analytics.
-
-        Returns aggregated token usage and USD cost, sorted by total cost descending.
-
-        Args:
-            group_by: Grouping dimension — "agent" (default), "team", or "task"
-            days: Look-back window in days (1–90, default 7)
-
-        Returns:
-            List of cost records with total_tokens_input, total_tokens_output,
-            total_tokens, total_cost_usd, and activity_count per group.
-        """
-        params = f"?group_by={urllib.parse.quote(group_by)}&days={days}"
-        return _api_call("GET", f"/api/analytics/token-costs{params}")
-
-    @mcp.tool()
-    def budget_status() -> dict[str, Any]:
-        """Check current cost budget utilization.
-
-        Returns weekly spend versus the configured budget, utilization percentage,
-        current status (ok / warning / exceeded), and an end-of-week forecast.
-
-        Returns:
-            Dict with spent_usd, budget_usd, utilization_pct, status,
-            forecast_usd, days_elapsed, and alert_threshold_pct.
-        """
-        return _api_call("GET", "/api/analytics/budget")
-
-    @mcp.tool()
     def decision_log(
         team_id: str = "",
         event_type: str = "decision",

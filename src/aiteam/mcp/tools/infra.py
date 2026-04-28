@@ -261,12 +261,12 @@ def register(mcp):
                 "install_hint": 'npx -y @modelcontextprotocol/server-slack (set SLACK_BOT_TOKEN, SLACK_TEAM_ID)',
                 "scenarios": [
                     "Leader briefing -> team_briefing + Slack channel push",
-                    "Error budget RED -> budget_status alert to #ops-alerts",
+                    "Error budget RED -> error_budget_status alert to #ops-alerts",
                     "Daily standup -> taskwall_view summary to #standup",
                 ],
                 "os_tools_used": [
                     "team_briefing", "send_notification", "briefing_list",
-                    "budget_status", "taskwall_view", "meeting_conclude",
+                    "error_budget_status", "taskwall_view", "meeting_conclude",
                 ],
             },
             "linear": {

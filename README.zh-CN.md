@@ -525,12 +525,10 @@ AI Team OS 专为 Claude Code 设计，不是独立框架：
 | `error_budget_update` | 记录任务结果到错误预算 |
 | `verify_completion` | 验证任务完成状态（状态 + memo 检查，防幻觉） |
 
-### 分析与成本追踪
+### 分析
 
 | 工具 | 说明 |
 |------|------|
-| `token_costs` | 查看 Token 用量和成本分析 |
-| `budget_status` | 检查周度成本预算和告警 |
 | `task_execution_trace` | 获取任务的统一执行时间线 |
 | `task_replay` | 回放任务执行历史 |
 | `task_compare` | 并排对比两次任务执行 |

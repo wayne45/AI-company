@@ -538,12 +538,10 @@ AI Team OS is built specifically for Claude Code, not as a standalone framework:
 | `error_budget_update` | Record task outcome against the error budget |
 | `verify_completion` | Verify task completion (status + memo check, anti-hallucination) |
 
-### Analytics & Cost Tracking
+### Analytics
 
 | Tool | Description |
 |------|-------------|
-| `token_costs` | View token usage and cost analytics |
-| `budget_status` | Check weekly cost budget and alerts |
 | `task_execution_trace` | Get unified execution timeline for a task |
 | `task_replay` | Replay task execution history |
 | `task_compare` | Compare two task executions side-by-side |

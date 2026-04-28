@@ -155,7 +155,7 @@ OS 工具链:
 ```
 
 OS 工具链:
-- `budget_status` — 查看错误预算状态
+- `error_budget_status` — 查看错误预算状态
 - `os_report_issue` — 创建紧急 Issue
 
 #### 场景 C: 每日站会摘要
