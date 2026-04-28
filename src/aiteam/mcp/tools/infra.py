@@ -30,11 +30,16 @@ def register(mcp):
             projects = projects_data.get("data", [])
             if projects:
                 cwd = os.getcwd().replace("\\", "/").rstrip("/").lower()
+                # Longest-prefix match — pick the most specific project
+                best_p = None
+                best_len = -1
                 for p in projects:
                     rp = (p.get("root_path") or "").replace("\\", "/").rstrip("/").lower()
-                    if rp and (cwd == rp or cwd.startswith(rp + "/")):
-                        result["project"] = {"id": p["id"], "name": p.get("name", "")}
-                        break
+                    if rp and (cwd == rp or cwd.startswith(rp + "/")) and len(rp) > best_len:
+                        best_p = p
+                        best_len = len(rp)
+                if best_p is not None:
+                    result["project"] = {"id": best_p["id"], "name": best_p.get("name", "")}
 
             teams_data = _api_call("GET", "/api/teams")
             active_teams = [t for t in teams_data.get("data", []) if t.get("status") == "active"]

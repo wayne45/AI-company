@@ -440,26 +440,50 @@ class HookTranslator:
             new_team.id,
         )
 
-        # Link to project — ALWAYS use cwd from payload (not Leader's project_id,
-        # because Leader may belong to a different project in multi-session scenarios)
+        # Link to project — prefer the session's Leader as authority, fall back
+        # to cwd matching only when no Leader exists yet. The Leader's project_id
+        # is locked in when the session first opened, so it's robust against
+        # ambiguous cwd (multiple CC windows whose cwds overlap by prefix).
         project_id = None
-        cwd = ""
-        # Get cwd from the SubagentStart payload that triggered this registration
-        if hasattr(self, '_current_event_cwd') and self._current_event_cwd:
-            cwd = self._current_event_cwd.replace("\\", "/").rstrip("/").lower()
-        if not cwd:
-            import os as _os
-            cwd = _os.getcwd().replace("\\", "/").rstrip("/").lower()
-        if cwd:
-            projects = await self.repo.list_projects()
-            for p in projects:
-                rp = (p.root_path or "").replace("\\", "/").rstrip("/").lower()
-                if rp and (cwd == rp or cwd.startswith(rp + "/")):
-                    project_id = p.id
+
+        # 1) Authoritative: session_id -> Leader -> project_id
+        if session_id:
+            leader = await self._find_leader(session_id)
+            if leader and leader.project_id:
+                project_id = leader.project_id
+                logger.info(
+                    "CC team mapping: session %s -> leader '%s' -> project %s",
+                    session_id[:8], leader.name, project_id,
+                )
+
+        # 2) Fallback: cwd longest-prefix match (only when no Leader yet)
+        if not project_id:
+            cwd = ""
+            if hasattr(self, '_current_event_cwd') and self._current_event_cwd:
+                cwd = self._current_event_cwd.replace("\\", "/").rstrip("/").lower()
+            if not cwd:
+                import os as _os
+                cwd = _os.getcwd().replace("\\", "/").rstrip("/").lower()
+            if cwd:
+                projects = await self.repo.list_projects()
+                # Pick the most specific (longest) matching root_path. Several
+                # projects can match via prefix (e.g. C:/Users/TUF and
+                # C:/Users/TUF/Desktop/AI...) — earlier code took the first
+                # match, which frequently picked the broader parent by mistake.
+                best_match = None
+                best_len = -1
+                for p in projects:
+                    rp = (p.root_path or "").replace("\\", "/").rstrip("/").lower()
+                    if rp and (cwd == rp or cwd.startswith(rp + "/")):
+                        if len(rp) > best_len:
+                            best_match = p
+                            best_len = len(rp)
+                if best_match is not None:
+                    project_id = best_match.id
                     logger.info(
-                        "CC team mapping: cwd '%s' matched project %s", cwd, p.name,
+                        "CC team mapping: cwd '%s' -> project %s (root_path=%s)",
+                        cwd, best_match.name, best_match.root_path,
                     )
-                    break
 
         if project_id:
             await self.repo.update_team(new_team.id, project_id=project_id)

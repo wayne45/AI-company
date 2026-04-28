@@ -164,12 +164,19 @@ def _init_session_project() -> None:
     try:
         projects = _api_call("GET", "/api/projects")
         cwd = os.getcwd().replace("\\", "/").rstrip("/").lower()
+        # Longest-prefix match — multiple projects can match via prefix
+        # (e.g. C:/Users/TUF and C:/Users/TUF/Desktop/AI...); pick the most specific.
+        best_p = None
+        best_len = -1
         for p in projects.get("data", []):
             rp = (p.get("root_path") or "").replace("\\", "/").rstrip("/").lower()
-            if rp and (cwd == rp or cwd.startswith(rp + "/")):
-                _session_project_id = p["id"]
-                logger.info("Session project: %s (%s)", p.get("name"), p["id"][:8])
-                return
+            if rp and (cwd == rp or cwd.startswith(rp + "/")) and len(rp) > best_len:
+                best_p = p
+                best_len = len(rp)
+        if best_p is not None:
+            _session_project_id = best_p["id"]
+            logger.info("Session project: %s (%s)", best_p.get("name"), best_p["id"][:8])
+            return
         logger.info("No project match for cwd=%s", cwd)
     except Exception as e:
         logger.warning("Failed to resolve session project: %s", e)

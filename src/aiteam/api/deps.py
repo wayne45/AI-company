@@ -201,12 +201,15 @@ async def _auto_create_projects(repo: StorageRepository) -> None:
         # Assign all orphan Teams to the best-matching Project by cwd
         import os
         cwd = os.getcwd().replace("\\", "/").rstrip("/").lower()
+        # Longest-prefix match — multiple projects can match via prefix
+        # (e.g. C:/Users/TUF and C:/Users/TUF/Desktop/AI...); pick the most specific.
         project = None
+        best_len = -1
         for p in existing_projects:
             rp = (p.root_path or "").replace("\\", "/").rstrip("/").lower()
-            if rp and (cwd == rp or cwd.startswith(rp + "/")):
+            if rp and (cwd == rp or cwd.startswith(rp + "/")) and len(rp) > best_len:
                 project = p
-                break
+                best_len = len(rp)
         if not project:
             project = existing_projects[0]  # ultimate fallback
         for team in orphan_teams:

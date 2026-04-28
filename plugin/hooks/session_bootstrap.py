@@ -425,12 +425,18 @@ def _build_briefing() -> str:
     if is_registered:
         matched_project_id = (reg_project_info.get("id") or "")
     elif projects_data and projects_data.get("data"):
+        # Longest-prefix match — pick most specific project when several match
+        best_proj = None
+        best_len = -1
+        cwd_lower = cwd.rstrip("/").lower()
         for proj in projects_data["data"]:
             rp = (proj.get("root_path") or "").replace("\\", "/").rstrip("/")
-            if rp and cwd.rstrip("/").lower().startswith(rp.lower()):
-                is_registered = True
-                matched_project_id = proj.get("id", "")
-                break
+            if rp and cwd_lower.startswith(rp.lower()) and len(rp) > best_len:
+                best_proj = proj
+                best_len = len(rp)
+        if best_proj is not None:
+            is_registered = True
+            matched_project_id = best_proj.get("id", "")
 
     if not is_registered:
         if not is_dismissed:
