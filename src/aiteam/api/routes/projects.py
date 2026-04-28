@@ -115,8 +115,10 @@ async def project_summary(
     pending_tasks = await repo.list_tasks_by_project(project_id, status=TaskStatus.PENDING)
     running_tasks = await repo.list_tasks_by_project(project_id, status=TaskStatus.RUNNING)
 
-    # Determine project status: active if any team active OR any task running/pending
-    is_active = len(active_teams) > 0 or len(running_tasks) > 0 or len(pending_tasks) > 0
+    # Determine project status: active only if work is actively in progress
+    # (any team active or any task running). Pending backlog alone doesn't count
+    # — every project with unfinished tasks would otherwise be "active" forever.
+    is_active = len(active_teams) > 0 or len(running_tasks) > 0
 
     # Top 3 pending tasks sorted by priority
     priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}

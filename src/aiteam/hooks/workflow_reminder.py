@@ -268,10 +268,11 @@ def _check_agent_team_name(event_data: dict) -> str | None:
             )
         return None  # Solo use is fine
 
-    # OS agent templates that don't require team context (review/support roles)
+    # OS agent templates that don't require team context (review-only roles).
+    # NOTE: refactor-cleaner is intentionally excluded — its toolset includes
+    # Write/Edit/Bash, so its work writes files and must be team-tracked.
     readonly_templates = [
-        "code-reviewer", "security-reviewer", "python-reviewer",
-        "refactor-cleaner", "security-reviewer", "tdd-guide",
+        "code-reviewer", "security-reviewer", "python-reviewer", "tdd-guide",
     ]
     for rt in readonly_templates:
         if rt in tool_input:
