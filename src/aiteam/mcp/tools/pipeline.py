@@ -1,4 +1,10 @@
-"""Pipeline (workflow stage) MCP tools."""
+"""Pipeline (workflow stage) MCP tools — Phase 1.3 redesign.
+
+pipeline_create: writes PipelineState into task.config, no longer generates
+                 ceremonial subtasks (Council R1 decision).
+pipeline_advance: advances current stage with optional force + triggered_by.
+pipeline_status: returns PipelineState + recent stage_history.
+"""
 
 from __future__ import annotations
 
@@ -13,67 +19,68 @@ def register(mcp):
     @mcp.tool()
     def pipeline_create(
         task_id: str,
-        pipeline_type: str,
-        skip_stages: list[str] | None = None,
+        task_type: str,
     ) -> dict[str, Any]:
-        """Create a stage pipeline for a task, auto-generating chained subtasks.
+        """Initialize a pipeline on a task using a lifecycle template.
 
-        Pipeline types enforce a standard workflow per task type:
-          feature:   Research → Design → Implement → Review → Test → Deploy
-          bugfix:    Reproduce → Diagnose → Fix → Review → Test
-          research:  Survey → Analyze → Report → Review
-          refactor:  Analysis → Plan → Implement → Review → Test
-          quick-fix: Implement → Test (shortcut)
-          spike:     Research → Report (shortcut)
-          hotfix:    Fix → Test (shortcut)
+        Writes PipelineState into task.config['pipeline'] and records the first
+        stage in stage_history. Does NOT generate ceremonial subtasks.
+
+        Lifecycle templates:
+          feature:   research → meeting → decompose → implement → test → review → retest
+          hotfix:    diagnose → fix → test
+          quick-fix: fix → test
+          research:  research → report
+          spike:     research → implement
+          refactor:  decompose → implement → test → review
+          debate:    meeting → decision
 
         Args:
             task_id: Task ID to attach the pipeline to
-            pipeline_type: Pipeline type (feature/bugfix/research/refactor/quick-fix/spike/hotfix)
-            skip_stages: Stage names to skip (optional, e.g. ["deploy"] to skip deployment)
+            task_type: Template name (feature/hotfix/quick-fix/research/spike/refactor/debate)
 
         Returns:
-            Pipeline overview with stages, subtask IDs, and recommended Agent template for first stage
+            Full PipelineState as a dict (template, current_stage, current_stage_class, ...)
         """
-        payload: dict[str, Any] = {"pipeline_type": pipeline_type}
-        if skip_stages:
-            payload["skip_stages"] = skip_stages
-        return _api_call("POST", f"/api/tasks/{task_id}/pipeline", payload)
+        return _api_call("POST", f"/api/tasks/{task_id}/pipeline/v2", {"task_type": task_type})
 
     @mcp.tool()
     def pipeline_advance(
         task_id: str,
-        result_summary: str = "",
+        target_stage: str | None = None,
+        force: bool = False,
+        triggered_by: str = "manual",
     ) -> dict[str, Any]:
-        """Advance the pipeline to the next stage (marks current stage as completed).
+        """Advance the pipeline to the next (or specified) stage.
 
-        Call this when the current stage's work is done.
-        Returns the next stage info and recommended Agent template.
-        When all stages are done, returns pipeline_completed=True.
+        When force=False, exit conditions are evaluated before advancing.
+        When force=True, exit checks are skipped (Leader override).
 
         Args:
             task_id: Task ID with an active pipeline
-            result_summary: Brief summary of what was accomplished in the completed stage
+            target_stage: Explicit target stage; if omitted, auto-selects next in sequence
+            force: Skip exit condition checks (default False)
+            triggered_by: Source of advance — "manual" / "auto" / "force" / "system"
 
         Returns:
-            Next stage info, Agent template recommendation, and progress
+            Updated PipelineState dict with from_stage, to_stage, and stage_history entry
         """
-        payload: dict[str, Any] = {}
-        if result_summary:
-            payload["result_summary"] = result_summary
-        return _api_call("POST", f"/api/tasks/{task_id}/pipeline/advance", payload)
+        payload: dict[str, Any] = {
+            "force": force,
+            "triggered_by": triggered_by,
+        }
+        if target_stage is not None:
+            payload["target_stage"] = target_stage
+        return _api_call("POST", f"/api/tasks/{task_id}/pipeline/v2/advance", payload)
 
     @mcp.tool()
     def pipeline_status(task_id: str) -> dict[str, Any]:
-        """Get pipeline progress overview for a task.
-
-        Shows all stages with their status, progress percentage,
-        current stage, and recommended Agent template.
+        """Get current pipeline state and recent stage history for a task.
 
         Args:
             task_id: Task ID with a pipeline
 
         Returns:
-            Full pipeline status including all stages, stats, and progress
+            PipelineState fields + last 5 stage_history entries
         """
-        return _api_call("GET", f"/api/tasks/{task_id}/pipeline")
+        return _api_call("GET", f"/api/tasks/{task_id}/pipeline/v2")
