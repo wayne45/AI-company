@@ -63,6 +63,15 @@
             "timeout": 2000
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/pipeline_gate.py\" PreToolUse",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -78,6 +87,15 @@
             "type": "command",
             "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/send_event.py\" PostToolUse",
             "timeout": 2000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/pipeline_gate.py\" PostToolUse",
+            "timeout": 3000
           }
         ]
       }
@@ -132,6 +150,11 @@
           {
             "type": "command",
             "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/context_tracker.py\"",
+            "timeout": 3000
+          },
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/autopilot_auto_stop.py\"",
             "timeout": 3000
           }
         ]

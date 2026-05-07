@@ -47,6 +47,7 @@ HOOK_EVENTS: dict = {
                 ("send_event PreToolUse", 2000),
             ],
         },
+        [("pipeline_gate PreToolUse", 3000)],
     ],
     "PostToolUse": [
         {
@@ -56,6 +57,7 @@ HOOK_EVENTS: dict = {
                 ("send_event PostToolUse", 2000),
             ],
         },
+        [("pipeline_gate PostToolUse", 3000)],
     ],
     "SessionStart": [
         [("session_bootstrap", 3000), ("send_event SessionStart", 2000)],
@@ -67,7 +69,7 @@ HOOK_EVENTS: dict = {
         [("send_event Stop", 2000)],
     ],
     "UserPromptSubmit": [
-        [("context_tracker", 3000)],
+        [("context_tracker", 3000), ("autopilot_auto_stop", 3000)],
     ],
     "PreCompact": [
         [("pre_compact_save", 5000)],

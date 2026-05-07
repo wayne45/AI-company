@@ -34,6 +34,7 @@ AGENT_TEMPLATES = [
 HOOK_MARKERS = [
     "ai-team-os", "workflow_reminder", "send_event",
     "session_bootstrap", "inject_subagent_context",
+    "pipeline_gate", "autopilot_auto_stop",
 ]
 
 
