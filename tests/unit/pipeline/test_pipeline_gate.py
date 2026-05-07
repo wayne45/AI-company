@@ -1,4 +1,4 @@
-"""Integration tests for pipeline_gate hook — TC-GATE-01 through TC-GATE-08.
+"""Integration tests for pipeline_gate hook — TC-GATE-01 through TC-GATE-08 + TC-ESC-01..04.
 
 Uses monkeypatching to replace API calls with mocks so no real server is needed.
 """
@@ -6,6 +6,8 @@ import importlib
 import io
 import json
 import sys
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -323,3 +325,104 @@ class TestMcpPrefixNormalization:
 
         assert exc_info.value.code == 2
         assert len(briefing_calls) == 1
+
+
+# ============================================================
+# Escalation trust root tests — TC-ESC-01..04
+# ============================================================
+
+_ESCALATION_AUTOPILOT_PIPELINE = {
+    "autopilot_active": True,
+    "current_stage": "implement",
+    "current_stage_class": "Execute",
+}
+
+
+class TestEscalationTrustRoot:
+    """TC-ESC-01..04: sub-agents cannot call escalation tools."""
+
+    def _make_subagent_dir(self, session_id: str, tmp_path: Path) -> Path:
+        sessions_dir = tmp_path / "subagent_sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / session_id).write_text("")
+        return sessions_dir
+
+    def _run_esc(self, payload: dict, monkeypatch, sessions_dir: Path) -> int:
+        import aiteam.hooks.pipeline_gate as gate_mod
+
+        raw = json.dumps(payload).encode("utf-8")
+        monkeypatch.setattr("sys.stdin", type("FB", (), {"buffer": io.BytesIO(raw)})())
+        monkeypatch.setattr("sys.stderr", io.StringIO())
+
+        monkeypatch.setattr(gate_mod, "_resolve_project_id", lambda cwd: "proj-1")
+        monkeypatch.setattr(gate_mod, "_find_current_autopilot_task", lambda pid: {"id": "task-esc"})
+        monkeypatch.setattr(gate_mod, "_get_pipeline_state", lambda tid: _ESCALATION_AUTOPILOT_PIPELINE)
+        monkeypatch.setattr(gate_mod, "_create_briefing", lambda **kw: None)
+
+        original_path_cls = gate_mod.Path
+
+        def patched_path(p):
+            if "subagent_sessions" in str(p):
+                return sessions_dir
+            return original_path_cls(p)
+
+        monkeypatch.setattr(gate_mod, "Path", patched_path)
+
+        exit_code = 0
+        try:
+            gate_mod.main()
+        except SystemExit as e:
+            exit_code = e.code if e.code is not None else 0
+
+        return exit_code
+
+    def test_tc_esc_01_subagent_pipeline_advance_force_true_blocked(self, monkeypatch, tmp_path):
+        """TC-ESC-01: sub-agent calling pipeline_advance(force=True) → exit 2."""
+        session_id = "test-session-esc01"
+        sessions_dir = self._make_subagent_dir(session_id, tmp_path)
+        payload = {
+            "tool_name": "pipeline_advance",
+            "tool_input": {"force": True},
+            "session_id": session_id,
+            "cwd": "/proj",
+        }
+        assert self._run_esc(payload, monkeypatch, sessions_dir) == 2
+
+    def test_tc_esc_02_subagent_pipeline_advance_force_false_allowed(self, monkeypatch, tmp_path):
+        """TC-ESC-02: sub-agent calling pipeline_advance(force=False) → allowed (exit 0)."""
+        session_id = "test-session-esc02"
+        sessions_dir = self._make_subagent_dir(session_id, tmp_path)
+        payload = {
+            "tool_name": "pipeline_advance",
+            "tool_input": {"force": False},
+            "session_id": session_id,
+            "cwd": "/proj",
+        }
+        # pipeline_advance is in ALL_EXEMPT; after escalation pass-through it exits 0
+        assert self._run_esc(payload, monkeypatch, sessions_dir) == 0
+
+    def test_tc_esc_03_subagent_briefing_resolve_blocked(self, monkeypatch, tmp_path):
+        """TC-ESC-03: sub-agent calling briefing_resolve → exit 2."""
+        session_id = "test-session-esc03"
+        sessions_dir = self._make_subagent_dir(session_id, tmp_path)
+        payload = {
+            "tool_name": "briefing_resolve",
+            "tool_input": {},
+            "session_id": session_id,
+            "cwd": "/proj",
+        }
+        assert self._run_esc(payload, monkeypatch, sessions_dir) == 2
+
+    def test_tc_esc_04_leader_no_marker_pipeline_advance_force_allowed(self, monkeypatch, tmp_path):
+        """TC-ESC-04: Leader (no sub-agent marker file) calling pipeline_advance(force=True) → allowed."""
+        sessions_dir = tmp_path / "subagent_sessions"
+        sessions_dir.mkdir()
+        # No marker file — this is the Leader
+        payload = {
+            "tool_name": "pipeline_advance",
+            "tool_input": {"force": True},
+            "session_id": "leader-session-no-marker",
+            "cwd": "/proj",
+        }
+        # is_subagent=False because marker file doesn't exist → escalation check passes
+        assert self._run_esc(payload, monkeypatch, sessions_dir) == 0

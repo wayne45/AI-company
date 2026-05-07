@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +432,33 @@ def main() -> None:
     # ----------------------------------------------------------------
     # PreToolUse: whitelist gate (existing logic)
     # ----------------------------------------------------------------
+
+    # Escalation trust root — these tools can only be invoked by user/Leader, not sub-agents.
+    ESCALATION_TOOLS: frozenset[str] = frozenset({
+        "pipeline_advance",  # only when force=True
+        "briefing_resolve",
+        "briefing_dismiss",
+    })
+
+    _SUBAGENT_SESSIONS_DIR = Path(
+        os.path.expanduser("~/.claude/data/ai-team-os/subagent_sessions")
+    )
+    session_id = payload.get("session_id", "")
+    is_subagent = bool(
+        session_id and (_SUBAGENT_SESSIONS_DIR / session_id).exists()
+    )
+
+    tool_name_norm = _normalize(tool_name)
+    if is_subagent and tool_name_norm in ESCALATION_TOOLS:
+        tool_input = payload.get("tool_input", {}) or {}
+        if tool_name_norm == "pipeline_advance" and not tool_input.get("force"):
+            pass  # regular (non-forced) advance is allowed from sub-agents
+        else:
+            sys.stderr.write(
+                f"[OS GATE] {tool_name_norm} 在 sub-agent session 不允许"
+                f"（escalation 必须用户/Leader 操作）\n"
+            )
+            sys.exit(2)
 
     # High-risk tools: create briefing and block in autonomous mode
     if _requires_user_ack(tool_name):
