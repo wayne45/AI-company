@@ -4,19 +4,28 @@ export const WS_URL = import.meta.env.VITE_WS_URL || `ws://${window.location.hos
 
 // Global project context — set by ProjectContext, read by apiFetch
 let currentProjectPath: string | null = null;
+let currentProjectId: string | null = null;
 
 export function setCurrentProjectPath(path: string | null) {
   currentProjectPath = path;
+}
+
+export function setCurrentProjectId(id: string | null) {
+  currentProjectId = id;
 }
 
 export function getCurrentProjectPath(): string | null {
   return currentProjectPath;
 }
 
+export function getCurrentProjectId(): string | null {
+  return currentProjectId;
+}
+
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const projectHeaders: Record<string, string> = currentProjectPath
-    ? { 'X-Project-Dir': currentProjectPath }
-    : {};
+  const projectHeaders: Record<string, string> = {};
+  if (currentProjectPath) projectHeaders['X-Project-Dir'] = currentProjectPath;
+  if (currentProjectId) projectHeaders['X-Project-Id'] = currentProjectId;
 
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...projectHeaders, ...options?.headers },

@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { setCurrentProjectPath } from '@/api/client';
+import { createContext, useContext, useState, useCallback } from 'react';
+import { setCurrentProjectPath, setCurrentProjectId } from '@/api/client';
 
 const STORAGE_KEY = 'ai-team-os:project';
 
@@ -27,20 +27,33 @@ function loadFromStorage(): ProjectState {
 }
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<ProjectState>(loadFromStorage);
-
-  // Sync to api/client module-level state on every change
-  useEffect(() => {
-    setCurrentProjectPath(state.projectPath);
-  }, [state.projectPath]);
+  // Sync the api/client module-level state on initial load. We do this
+  // synchronously (not in useEffect) so that the very first apiFetch call
+  // — even if it fires during the same React commit as a project switch —
+  // already sees the correct X-Project-Id header.
+  const [state, setState] = useState<ProjectState>(() => {
+    const initial = loadFromStorage();
+    setCurrentProjectPath(initial.projectPath);
+    setCurrentProjectId(initial.projectId);
+    return initial;
+  });
 
   const switchProject = useCallback((id: string, path: string, name: string) => {
+    // CRITICAL: write the module-level header state BEFORE setState so any
+    // queries triggered by the same render (e.g. invalidateQueries called
+    // immediately after switchProject) read the new project id, not the old one.
+    // The previous useEffect-based sync ran one tick late, causing race
+    // conditions where invalidated queries refetched with the OLD header.
+    setCurrentProjectPath(path);
+    setCurrentProjectId(id);
     const next: ProjectState = { projectId: id, projectPath: path, projectName: name };
     setState(next);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   }, []);
 
   const clearProject = useCallback(() => {
+    setCurrentProjectPath(null);
+    setCurrentProjectId(null);
     setState({ projectId: null, projectPath: null, projectName: null });
     localStorage.removeItem(STORAGE_KEY);
   }, []);

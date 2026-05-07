@@ -498,9 +498,13 @@ class ChannelMessage(BaseModel):
 
 
 class EcosystemRepoProfile(BaseModel):
-    """Claude 生态仓档案 — 广索引检索 + 周期更新。"""
+    """Claude 生态仓档案 — 广索引检索 + 周期更新。
+
+    项目隔离: project_id=None 表示全局/未归属，每个项目拥有独立的快照行。
+    """
 
     id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
     repo_full_name: str  # "owner/repo"
     name: str
     owner: str
@@ -516,6 +520,174 @@ class EcosystemRepoProfile(BaseModel):
     one_line_summary: str | None = None
     last_scanned_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     first_seen_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    # Stage B 扩展字段
+    pushed_at: datetime | None = None  # GitHub 仓最后 push 时间，用于判活跃度
+    is_archived: bool = False  # > 365 天未 push 标记为 deprecated
+    scan_run_id: str | None = None  # 关联到扫描批次 EcosystemScanRun.id
+    description_excerpt: str = ""  # 描述摘要，用于二次相关性过滤
+
+
+# ============================================================
+# Ecosystem 扩展模型 (Stage B)
+# ============================================================
+
+
+class EcosystemDeepReviewStatus(enum.StrEnum):
+    """深扫报告状态。"""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class IntegrationRecommendation(enum.StrEnum):
+    """集成建议级别。"""
+
+    INTEGRATE = "integrate"
+    REFERENCE = "reference"
+    LEARN = "learn"
+    SKIP = "skip"
+
+
+class DemoResult(enum.StrEnum):
+    """Demo 运行结果。"""
+
+    SUCCESS = "success"
+    FAIL = "fail"
+    SKIPPED = "skipped"
+
+
+class EcosystemTagCategory(enum.StrEnum):
+    """生态标签分类。"""
+
+    CAPABILITY = "capability"
+    TECH_STACK = "tech_stack"
+    MATURITY = "maturity"
+    POSITIONING = "positioning"
+
+
+class EcosystemTagSource(enum.StrEnum):
+    """标签来源。"""
+
+    GITHUB_TOPIC = "github_topic"
+    AUTO_RULE = "auto_rule"
+    AUTO_LLM = "auto_llm"
+    MANUAL = "manual"
+
+
+class EcosystemRelationType(enum.StrEnum):
+    """仓与仓的关联类型。"""
+
+    INSPIRED_BY = "inspired_by"
+    FORKS = "forks"
+    EXTENDS = "extends"
+    COMPETES = "competes"
+    DEPENDS_ON = "depends_on"
+
+
+class EcosystemScanStrategy(enum.StrEnum):
+    """扫描策略。"""
+
+    INCREMENTAL = "incremental"
+    FULL = "full"
+    TOPIC = "topic"
+    TRENDING = "trending"
+
+
+class EcosystemDeepReview(BaseModel):
+    """生态仓深扫报告 — 针对单个仓的结构化分析。
+
+    FK 关系：repo_id → EcosystemRepoProfile.id (CASCADE)，report_id → Report.id (可选)。
+    项目隔离: project_id=None 表示全局/未归属，深扫报告归属于发起项目。
+    """
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
+    repo_id: str  # FK -> EcosystemRepoProfile.id
+    status: EcosystemDeepReviewStatus = EcosystemDeepReviewStatus.QUEUED
+    agent_id: str | None = None  # 执行此次深扫的 agent
+    summary_md: str = ""
+    architecture_md: str = ""
+    demo_result: DemoResult | None = None
+    demo_log_excerpt: str = ""
+    risks_md: str = ""
+    learnings_md: str = ""
+    integration_recommendation: IntegrationRecommendation | None = None
+    report_id: str | None = None  # FK -> Report.id
+    dispatch_prompt: str = ""  # sub-agent dispatch prompt (separate from demo_log_excerpt)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: float = 0.0
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemTag(BaseModel):
+    """能力标签字典 — 描述生态仓的能力 / 技术栈 / 成熟度 / 定位。"""
+
+    id: str = Field(default_factory=_new_id)
+    name: str  # unique，如 "memory_system"
+    aliases: list[str] = Field(default_factory=list)
+    category: EcosystemTagCategory
+    description: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemRepoTag(BaseModel):
+    """仓-标签多对多关联。
+
+    FK 关系：repo_id → EcosystemRepoProfile.id (CASCADE)，tag_id → EcosystemTag.id (RESTRICT)。
+    Unique constraint: (repo_id, tag_id)。
+    项目隔离: project_id 跟随 repo_id 所属项目。
+    """
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
+    repo_id: str  # FK -> EcosystemRepoProfile.id
+    tag_id: str  # FK -> EcosystemTag.id
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    source: EcosystemTagSource = EcosystemTagSource.MANUAL
+    agent_id: str | None = None  # 打标人
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemRelation(BaseModel):
+    """仓与仓的引用 / 衍生关系。
+
+    FK 关系：from_repo_id / to_repo_id → EcosystemRepoProfile.id (CASCADE)。
+    项目隔离: 项目内部的研究产出，不跨项目共享。
+    """
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
+    from_repo_id: str  # FK -> EcosystemRepoProfile.id
+    to_repo_id: str  # FK -> EcosystemRepoProfile.id
+    relation_type: EcosystemRelationType
+    evidence: str = ""  # 来源说明
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    agent_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemScanRun(BaseModel):
+    """扫描批次记录 — 一次扫描任务的执行元数据与统计。
+
+    项目隔离: 扫描历史归属于发起扫描的项目。
+    """
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
+    strategy: EcosystemScanStrategy = EcosystemScanStrategy.INCREMENTAL
+    started_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    completed_at: datetime | None = None
+    duration_seconds: float = 0.0
+    repos_added: int = 0
+    repos_updated: int = 0
+    repos_skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+    notes: str = ""
+    triggered_by: str = "manual"  # "manual" / "cron"
+    agent_id: str | None = None
 
 
 # ============================================================

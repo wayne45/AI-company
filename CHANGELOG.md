@@ -3,6 +3,62 @@
 All notable changes to AI Team OS will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.4.0] — 2026-05-07
+
+### Added — Ecosystem Research Platform (Stage A-J)
+
+A complete project-isolated platform for discovering, tagging, and deep-reviewing the Claude/MCP/agent open-source ecosystem. 188 repos indexed in initial scan, with multi-layer tagging achieving 2.05 tags/repo average and 1.5% zero-tag rate.
+
+- **Storage layer (Stage B)** — 5 new tables (`EcosystemRepoProfile` extended + `EcosystemDeepReview` + `EcosystemTag` dictionary + `EcosystemRepoTag` association + `EcosystemRelation` + `EcosystemScanRun`); 21 seed tags; FK CASCADE for repo deletes, RESTRICT for tag deletes; 50/50 unit tests.
+
+- **Periodic scanning (Stage C)** — `EcosystemScanner` service with incremental strategy (skips repos scanned <7 days), full strategy, ScanRun audit trail, GitHub API graceful degradation, owner blacklist + keyword whitelist secondary filtering. 3 new MCP tools (`ecosystem_scan_periodic`, `ecosystem_scan_status`, `ecosystem_scan_history`) + 5 REST endpoints + 31 new tests.
+
+- **Three-layer tagging (Stage D)** — Layer 1 GitHub topics direct mapping (105 hits), Layer 2 keyword rules (70 hits), Layer 3 LLM dispatch_plan mode for sub-agent fan-out. 5 new MCP tools + EcosystemTag dictionary with 26 tags (incl. capability/tech_stack/maturity/positioning categories) + 48 unit tests.
+
+- **Multi-dim search (Stage E)** — `ecosystem_search` upgraded to 11 parameters (query/tags AND/min_stars/language/sort_by/has_deep_review/etc.), `ecosystem_repo_get` returns full profile + tags + deep_reviews + relations + scan_run, `ecosystem_search_by_capability` for tag-driven retrieval. SQLite NULLS LAST emulation, EXISTS subquery for tag AND. 38 new tests, p95 < 50ms target.
+
+- **Deep-review workflow (Stage F)** — 5-section report template (positioning / architecture / lessons / risks / integration), `EcosystemDeepReviewer` service dispatches Explore + backend-architect agents via `dispatch_plan` (CC subagent compatible), PostToolUse `deep_review_link.py` hook auto-links saved reports to `EcosystemDeepReview.report_id`. 4 new MCP tools + 5 REST endpoints + 19 new tests.
+
+- **Auto-summary (Stage G)** — 4 markdown summary tools: `ecosystem_summary_weekly`, `ecosystem_summary_by_tag`, `ecosystem_summary_top_n`, `ecosystem_summary_health`. Auto `report_save` with `report_type=ecosystem-{weekly,by-tag,top-n,health}`. N+1 avoided via single-pass joins. 33 new tests.
+
+- **Frontend (Stage H)** — `/ecosystem` list page (4-col card grid + filter bar + pagination), `/ecosystem/:repoId` detail page with 4 new components (`CapabilityTags` / `DeepReviewSection` / `RelationsSection` / `ScanRunSection`), v2 API consumed via `useEcosystemRepoFull` hook (UUID → full_name resolution + path encoding). Mobile responsive, Playwright screenshots verified.
+
+- **Project isolation (Stage J)** — All 6 ecosystem tables get nullable `project_id` column with composite UNIQUE on `(project_id, repo_full_name)` for `EcosystemRepoProfile`. `EcosystemTag` dictionary keeps `project_id=NULL` for global seed (21 tags shared across projects). `X-Project-Id` HTTP header → `get_scoped_repository` routing; MCP `_api_call` auto-injects header from cwd-inferred session project. Auto `backfill_ecosystem_to_project` startup hook migrates legacy 188 repos to AI Team OS project. Dashboard `setCurrentProjectId` syncs on project switch. 10 new isolation tests, 1109 unit tests passing.
+
+### Added — Tag quality polish (Stage K4)
+
+- **`replace_auto` mode** for `ecosystem_tag_apply_batch` — Replace mode (default `False` for backward compat) deletes existing `auto_rule` and `github_topic` tags before re-applying, preserving `manual` and `auto_llm` tags. Solved the bug where new rules produced new tags but stale `mcp_framework` false positives (99 repos) remained from old rule passes.
+
+- **5 new tags + edge-case rules** — Added `claude_code` / `agent_harness` / `javascript` / `java` / `docs_only` to seed dictionary. New `LANGUAGE_TAG_MAP`, `DOCS_ONLY_LANGUAGES`, `DOCS_ONLY_NAME_PATTERNS` for Layer 2 sub-rules. `mcp_framework` false-positive rate dropped from 37% (99/265) to **0.8% (2/265)**, average tags/repo from **1.01 → 2.05**, zero-tag from **28.7% → 1.5%**.
+
+- **18+ edge-case research** — `docs/ecosystem-tag-edge-cases.md` documents real-world tagging anomalies (n8n / dify / awesome-mcp-servers / claude-cookbooks / hermes-agent / netdata / JavaGuide) with root causes and rule fixes.
+
+### Performance — Search optimization (Stage K1)
+
+- **5 composite indexes** on `ecosystem_repo_profiles`: `(project_id, stars)`, `(project_id, category, stars)`, `(project_id, language, stars)`, `(project_id, pushed_at)`, `(project_id, is_archived, stars)`. EXPLAIN QUERY PLAN verified all TEMP B-TREE eliminated.
+
+- **search p95: 2057ms → 13.1ms (156x improvement)** measured on 100 random queries (real production data, 265 repos). p50 6.6ms / p99 25ms.
+
+- **`ecosystem_search` default behavior fixed** — Empty `tags=[]` now bypasses the EXISTS subquery (prevents full-table scan) and returns the full result set sorted by stars instead of an empty list.
+
+- `compute_ecosystem_facet_counts` refactored to single-pass aggregation (eliminates 2/3 IO).
+
+- 6 new performance regression tests.
+
+### Fixed
+
+- **`context_tracker` 1M context window detection on new model variants** — `claude-opus-4-7` and other new opus variants were misreported as 200K when actually 1M, causing false 99% context warnings at 198K tokens. Two-level detection now: (1) exact `{model}[1m]` match, (2) family-level fallback (any `claude-{opus|sonnet|haiku}-*[1m]` history triggers 1M for that family). New `CLAUDE_CONTEXT_SIZE` env var for ultimate user override. 4 new tests with module-level autouse fixture isolating `~/.claude.json` from test machine.
+
+- **Auto-revive completed teams on new agent registration** — Hook translator now flips `team.status=completed` back to `active` when a new CC agent registers against it, with loud warning log + `team.auto_revived` event. Replaces the previous hard-block which disrupted long-running tasks (e.g., scan jobs on archived teams).
+
+### Frontend bug fix (Stage K2)
+
+- **Detail page `深度档案区` placeholder removed** — Previously the detail page hardcoded "TODO: Stage E v2 API" placeholder text even though the v2 API (`/profiles/{name}/full`) existed since Stage E. `useEcosystemRepoFull` hook now consumes v2 directly with UUID → full_name resolution and path-segment encoding for slashes. v2 failure gracefully degrades to v1 list-based fallback.
+
+### Changed
+
+- **Plugin description updated** — Now reflects 140+ MCP tools (incl. 30+ ecosystem research) + Ecosystem Research Platform feature set. New marketplace tags: `ecosystem-research`, `github-discovery`, `code-mining`.
+
 ## [1.3.4] — 2026-04-14
 
 ### Fixed

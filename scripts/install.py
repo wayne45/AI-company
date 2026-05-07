@@ -58,6 +58,7 @@ HOOK_EVENTS: dict = {
             ],
         },
         [("pipeline_gate PostToolUse", 3000)],
+        [("deep_review_link", 3000)],
     ],
     "SessionStart": [
         [("session_bootstrap", 3000), ("send_event SessionStart", 2000)],

@@ -124,6 +124,18 @@ Runs entirely within your existing Claude Code subscription:
 - MCP tools, hooks, and Agent templates are all local
 - 100% utilization of your CC plan
 
+### 8. Ecosystem Research Platform (new in 1.4.0)
+
+Project-isolated discovery + tagging + deep-review workflow for the Claude/MCP/agent open-source ecosystem:
+
+- **Periodic GitHub scanning**: cron-driven incremental scan with multi-strategy filtering (topic search, owner blacklist, keyword whitelist), audit trail via `EcosystemScanRun`, GitHub API graceful degradation
+- **3-layer auto-tagging**: Layer 1 GitHub topics direct mapping, Layer 2 keyword + language + docs-only rules, Layer 3 LLM dispatch_plan for sub-agent fan-out (max-20 concurrent). 188 repos baseline: avg 2.05 tags/repo, 1.5% zero-tag rate
+- **Multi-dim search**: 11 parameters (query / tags AND / min_stars / language / sort_by / has_deep_review / etc.) with 5 composite indexes — search p95 < 15ms on 265 repos
+- **Deep-review workflow**: 5-section report template (positioning / architecture / lessons / risks / integration), `ecosystem_deep_review_request` dispatches Explore + backend agent, `PostToolUse` hook auto-links saved reports
+- **Auto-summary**: 4 markdown tools (weekly briefing / by-tag / top-N / health) with auto `report_save` for dashboard rendering
+- **Project isolation**: each project has its own ecosystem repo collection; `X-Project-Id` HTTP header routing; 21-tag dictionary shared globally as seed
+- **Dashboard `/ecosystem` page**: list with filters + detail page consuming v2 API + 4 components (CapabilityTags / DeepReviewSection / RelationsSection / ScanRunSection)
+
 ---
 
 ## It Built Itself

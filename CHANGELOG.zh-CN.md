@@ -3,6 +3,62 @@
 AI Team OS 的所有重要变更均记录在此文件中。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)
 
+## [1.4.0] — 2026-05-07
+
+### 新增 — 生态研究平台（Stage A-J）
+
+完整的项目隔离开源生态发现/打标/深度审查平台。专为 Claude/MCP/agent 开源生态设计。首扫入档 188 仓，三层打标平均 2.05 tags/repo，0 标签率仅 1.5%。
+
+- **数据层（Stage B）** — 5 张新表：`EcosystemRepoProfile` 扩展 + `EcosystemDeepReview` 深扫报告 + `EcosystemTag` 标签字典 + `EcosystemRepoTag` 关联 + `EcosystemRelation` 仓与仓关系 + `EcosystemScanRun` 扫描批次。21 个 seed 标签；删除仓档案 CASCADE 删除关联，删标签 RESTRICT；50/50 单元测试。
+
+- **周期扫描（Stage C）** — `EcosystemScanner` 服务，增量策略（< 7 天扫过的跳过）+ 全量策略 + ScanRun 审计 + GitHub API 优雅降级 + owner 黑名单 + 关键词白名单二次过滤。3 个新 MCP 工具（`ecosystem_scan_periodic` / `ecosystem_scan_status` / `ecosystem_scan_history`）+ 5 个 REST 端点 + 31 个新测试。
+
+- **三层打标（Stage D）** — Layer 1 GitHub topics 直接映射（命中 105 仓）+ Layer 2 关键词规则（命中 70 仓）+ Layer 3 LLM dispatch_plan 模式派子 agent。5 个新 MCP 工具 + 26 个标签字典（capability/tech_stack/maturity/positioning 四类）+ 48 个单元测试。
+
+- **多维搜索（Stage E）** — `ecosystem_search` 升级到 11 个参数（query/tags AND/min_stars/language/sort_by/has_deep_review 等），`ecosystem_repo_get` 返回 profile+tags+deep_reviews+relations+scan_run 全息详情，`ecosystem_search_by_capability` 按标签反向检索。SQLite NULLS LAST 模拟 + EXISTS subquery 实现 tag AND 语义。38 新测试，p95 < 50ms 目标。
+
+- **深扫工作流（Stage F）** — 5 段式报告模板（真实定位 / 架构 / 借鉴点 / 风险 / 集成建议）+ `EcosystemDeepReviewer` 服务通过 `dispatch_plan` 派 Explore + backend-architect 子 agent（兼容 CC 子进程模型）+ PostToolUse `deep_review_link.py` hook 自动关联 report 到 `EcosystemDeepReview.report_id`。4 个新 MCP 工具 + 5 个 REST 端点 + 19 个新测试。
+
+- **自动汇总（Stage G）** — 4 个 markdown 汇总工具：`ecosystem_summary_weekly`（周报）/ `ecosystem_summary_by_tag`（按方向）/ `ecosystem_summary_top_n`（Top N 排行）/ `ecosystem_summary_health`（平台自检）。自动 `report_save`（报告类型 `ecosystem-{weekly,by-tag,top-n,health}`）。Join 一次拉完避免 N+1。33 个新测试。
+
+- **前端（Stage H）** — `/ecosystem` 列表页（4 列卡片 + 筛选栏 + 分页），`/ecosystem/:repoId` 详情页 + 4 个新组件（`CapabilityTags` / `DeepReviewSection` / `RelationsSection` / `ScanRunSection`），通过 `useEcosystemRepoFull` hook 消费 v2 API（UUID → full_name 反查 + path 段编码）。响应式 + Playwright 截图验证。
+
+- **项目隔离（Stage J）** — 6 张 ecosystem 表全部加 nullable `project_id` 列；`EcosystemRepoProfile` 用 `(project_id, repo_full_name)` 联合 UNIQUE。`EcosystemTag` 字典保持 `project_id=NULL`（全局共享 21 seed）。`X-Project-Id` HTTP header → `get_scoped_repository` 路由；MCP `_api_call` 自动注入（基于 cwd 推断的 session 项目）。启动时自动 `backfill_ecosystem_to_project` 钩子迁移历史 188 仓到 AI Team OS 项目。前端 `setCurrentProjectId` 切换项目时同步。10 个隔离测试 + 1109 全套 unit 测试通过。
+
+### 新增 — 标签质量打磨（Stage K4）
+
+- **`ecosystem_tag_apply_batch` 加 `replace_auto` 模式** — 替换模式（默认 `False` 向后兼容）：先删除该仓所有 `auto_rule` 和 `github_topic` 来源的 RepoTag 行（保留 `manual` 和 `auto_llm`），再插入新规则的结果。修复了"新规则虽产生新标签但旧 `mcp_framework` 假阳性 99 仓没清"的 bug。
+
+- **5 个新标签 + 边界规则** — `claude_code` / `agent_harness` / `javascript` / `java` / `docs_only` 加入 seed 字典。新增 `LANGUAGE_TAG_MAP`、`DOCS_ONLY_LANGUAGES`、`DOCS_ONLY_NAME_PATTERNS` 三组 Layer 2 子规则。`mcp_framework` 假阳性率从 37%（99/265）降到 **0.8%（2/265）**，平均标签数从 **1.01 → 2.05**，0 标签率从 **28.7% → 1.5%**。
+
+- **18+ 边界仓实地调研** — `docs/ecosystem-tag-edge-cases.md` 记录真实 anomaly（n8n / dify / awesome-mcp-servers / claude-cookbooks / hermes-agent / netdata / JavaGuide 等）+ 根因 + 规则修复。
+
+### 性能 — 搜索优化（Stage K1）
+
+- **`ecosystem_repo_profiles` 加 5 个复合索引**：`(project_id, stars)` / `(project_id, category, stars)` / `(project_id, language, stars)` / `(project_id, pushed_at)` / `(project_id, is_archived, stars)`。EXPLAIN QUERY PLAN 验证 TEMP B-TREE 全部消除。
+
+- **search p95：2057ms → 13.1ms（156x 提升）** — 100 次 random query 实测（真实生产数据，265 仓）。p50 6.6ms / p99 25ms。
+
+- **`ecosystem_search` 缺省行为修复** — `tags=[]` 现在跳过 EXISTS subquery（避免全表扫），返回按 stars 排序的全集而非空。
+
+- `compute_ecosystem_facet_counts` 重构为单次 SELECT 三列 + Python 聚合（IO 减 2/3）。
+
+- 6 个新性能 regression 测试。
+
+### 修复
+
+- **`context_tracker` 新 model 变体的 1M 检测** — `claude-opus-4-7` 等新 opus 模型在 1M 模式下被误判为 200K window，导致 198K tokens 时报告 99% 假警告。两层检测：(1) 精确 `{model}[1m]` 匹配；(2) 同 family 兜底（任意 `claude-{opus|sonnet|haiku}-*[1m]` 历史 → 该 family 视为 1M）。新增 `CLAUDE_CONTEXT_SIZE` env 终极覆盖。4 个新测试 + module 级 autouse fixture 隔离 `~/.claude.json`。
+
+- **新 agent 注册到 completed 团队自动恢复** — hook_translator 现在检测到新 agent 注册到 `status=completed` 的团队时自动恢复为 `active` 并发出 `team.auto_revived` 事件 + 警告日志。替代了之前的硬阻断方式（曾导致历史团队上的长任务被中断）。
+
+### 前端 bug 修复（Stage K2）
+
+- **详情页 `深度档案区` 占位符移除** — 之前详情页硬编码 "TODO: Stage E v2 API" 占位文案，但 v2 API（`/profiles/{name}/full`）从 Stage E 起就已存在。`useEcosystemRepoFull` hook 现在直接消费 v2（含 UUID → full_name 反查 + path 段斜杠编码）。v2 失败时优雅降级到 v1 列表数据。
+
+### 变更
+
+- **Plugin description 升级** — 反映 140+ MCP 工具（含 30+ 生态研究工具）+ 生态研究平台。新增 marketplace 标签：`ecosystem-research`、`github-discovery`、`code-mining`。
+
 ## [1.3.4] — 2026-04-14
 
 ### 修复

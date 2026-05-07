@@ -14,6 +14,7 @@ export const zh = {
     pipelines: 'Pipeline 可视化',
     failures: '失败分析',
     prompts: 'Prompt Registry',
+    ecosystem: '生态档案',
     settings: '设置',
   },
   status: {

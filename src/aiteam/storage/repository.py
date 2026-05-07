@@ -20,7 +20,12 @@ from aiteam.storage.models import (
     AgentModel,
     ChannelMessageModel,
     CrossMessageModel,
+    EcosystemDeepReviewModel,
+    EcosystemRelationModel,
     EcosystemRepoProfileModel,
+    EcosystemRepoTagModel,
+    EcosystemScanRunModel,
+    EcosystemTagModel,
     EventModel,
     LeaderBriefingModel,
     MeetingMessageModel,
@@ -42,7 +47,13 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    EcosystemDeepReview,
+    EcosystemDeepReviewStatus,
+    EcosystemRelation,
     EcosystemRepoProfile,
+    EcosystemRepoTag,
+    EcosystemScanRun,
+    EcosystemTag,
     Event,
     EventType,
     LeaderBriefing,
@@ -2115,23 +2126,58 @@ class StorageRepository:
     # Ecosystem repo profiles
     # ================================================================
 
-    async def upsert_ecosystem_profile(self, profile: EcosystemRepoProfile) -> None:
-        """按 repo_full_name 唯一键 upsert 生态仓档案，更新动态字段。"""
+    def _effective_project_id(
+        self, explicit: str | None
+    ) -> str | None:
+        """Resolve project_id used to scope ecosystem rows.
+
+        Precedence: explicit argument > _project_scope (set on repo init) > None.
+        Empty string is normalised to None so callers can pass "" to mean
+        "no override".
+        """
+        if explicit:
+            return explicit
+        if self._project_scope:
+            return self._project_scope
+        return None
+
+    async def upsert_ecosystem_profile(
+        self,
+        profile: EcosystemRepoProfile,
+        project_id: str | None = None,
+    ) -> None:
+        """按 (project_id, repo_full_name) 唯一键 upsert 生态仓档案，更新动态字段。
+
+        Args:
+            profile: 待写入的生态仓档案 Pydantic 模型。
+            project_id: 显式指定项目作用域；为空时回退到当前 repo 的 _project_scope，
+                        最终 None 表示全局/未归属（兼容旧数据）。
+        """
         import json
         from datetime import timezone
 
         now = profile.last_scanned_at
+        effective_pid = self._effective_project_id(project_id) or profile.project_id
+        # Stamp project_id back onto the Pydantic so from_pydantic carries it.
+        if effective_pid and not profile.project_id:
+            profile.project_id = effective_pid
+
         async with get_session(self._db_url) as session:
-            result = await session.execute(
-                select(EcosystemRepoProfileModel).where(
-                    EcosystemRepoProfileModel.repo_full_name == profile.repo_full_name
-                )
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.repo_full_name == profile.repo_full_name
             )
+            if effective_pid is None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id.is_(None))
+            else:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             if row is None:
                 session.add(EcosystemRepoProfileModel.from_pydantic(profile))
             else:
-                # Update dynamic fields; preserve first_seen_at
+                # Update dynamic fields; preserve first_seen_at + project_id
                 row.stars = profile.stars
                 row.description = profile.description
                 row.language = profile.language
@@ -2143,6 +2189,11 @@ class StorageRepository:
                 row.relevance_score = profile.relevance_score
                 row.one_line_summary = profile.one_line_summary
                 row.last_scanned_at = now
+                # Stage B 字段：动态可更新
+                row.pushed_at = profile.pushed_at
+                row.is_archived = profile.is_archived
+                row.scan_run_id = profile.scan_run_id
+                row.description_excerpt = profile.description_excerpt or ""
 
     async def search_ecosystem_profiles(
         self,
@@ -2153,12 +2204,22 @@ class StorageRepository:
         needs_deep_review: bool | None = None,
         category: str = "",
         limit: int = 50,
+        project_id: str | None = None,
     ) -> list[EcosystemRepoProfile]:
-        """按字段筛选生态仓档案，支持关键词、topic、star 范围、深审标记。"""
+        """按字段筛选生态仓档案，支持关键词、topic、star 范围、深审标记。
+
+        Args:
+            project_id: 显式指定项目作用域；为空时由 _project_scope 自动注入。
+        """
         from sqlalchemy import or_
 
         async with get_session(self._db_url) as session:
             stmt = select(EcosystemRepoProfileModel)
+            stmt = self._apply_project_filter(stmt, EcosystemRepoProfileModel)
+            if project_id:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.project_id == project_id
+                )
 
             if min_stars > 0:
                 stmt = stmt.where(EcosystemRepoProfileModel.stars >= min_stars)
@@ -2190,3 +2251,923 @@ class StorageRepository:
             result = await session.execute(stmt)
             rows = result.scalars().all()
             return [r.to_pydantic() for r in rows]
+
+    async def get_ecosystem_profile(
+        self,
+        repo_full_name: str,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """按 repo_full_name 获取单个生态仓档案。
+
+        Args:
+            project_id: 显式作用域；为空回退到 _project_scope。
+                若都为空则匹配 project_id IS NULL（全局行）。
+        """
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.repo_full_name == repo_full_name
+            )
+            if effective_pid is None and self._project_scope == "":
+                # No scope at all — return any (global lookup, used by
+                # cross-project tooling and tests).
+                pass
+            elif effective_pid is None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id.is_(None))
+            else:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def get_ecosystem_profile_by_id(
+        self,
+        repo_id: str,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """按主键 id 获取单个生态仓档案。
+
+        Args:
+            project_id: 显式作用域；为空回退到 _project_scope。
+                作用域非空时仅匹配同项目 id，避免跨项目泄露。
+        """
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.id == repo_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    # ================================================================
+    # Ecosystem deep reviews
+    # ================================================================
+
+    async def create_deep_review(
+        self,
+        review: EcosystemDeepReview,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview:
+        """创建一份深扫报告记录。
+
+        Args:
+            project_id: 显式作用域；空时使用 _project_scope，再空时使用 review.project_id。
+        """
+        effective_pid = self._effective_project_id(project_id) or review.project_id
+        if effective_pid and not review.project_id:
+            review.project_id = effective_pid
+        async with get_session(self._db_url) as session:
+            session.add(EcosystemDeepReviewModel.from_pydantic(review))
+        return review
+
+    async def get_deep_review(
+        self,
+        review_id: str,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview | None:
+        """按 id 获取深扫报告。
+
+        Args:
+            project_id: 显式作用域；空回退到 _project_scope，作用域非空时仅匹配同项目。
+        """
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel).where(
+                EcosystemDeepReviewModel.id == review_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemDeepReviewModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def update_deep_review(
+        self,
+        review_id: str,
+        **fields: Any,
+    ) -> EcosystemDeepReview | None:
+        """部分更新深扫报告字段。fields 中的 enum 自动转 .value。
+
+        - 若 fields 含 _project_id 关键字（service 显式传入），仅匹配同项目；
+        - 否则若当前 repo 设置了 _project_scope，则只允许更新同项目下的行。
+        """
+        explicit_pid = fields.pop("_project_id", None)
+        effective_pid = explicit_pid or self._effective_project_id(None)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel).where(
+                EcosystemDeepReviewModel.id == review_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemDeepReviewModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            for key, value in fields.items():
+                if hasattr(value, "value"):
+                    value = value.value  # noqa: PLW2901  # enum -> str
+                if hasattr(row, key):
+                    setattr(row, key, value)
+            await session.flush()
+            return row.to_pydantic()
+
+    async def list_deep_reviews(
+        self,
+        repo_id: str = "",
+        status: str = "",
+        limit: int = 50,
+        project_id: str | None = None,
+    ) -> list[EcosystemDeepReview]:
+        """按 repo_id 或 status 列出深扫报告。空字符串忽略对应过滤条件。
+
+        Args:
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel)
+            stmt = self._apply_project_filter(stmt, EcosystemDeepReviewModel)
+            if project_id:
+                stmt = stmt.where(
+                    EcosystemDeepReviewModel.project_id == project_id
+                )
+            if repo_id:
+                stmt = stmt.where(EcosystemDeepReviewModel.repo_id == repo_id)
+            if status:
+                stmt = stmt.where(EcosystemDeepReviewModel.status == status)
+            stmt = stmt.order_by(EcosystemDeepReviewModel.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # Ecosystem tags
+    # ================================================================
+
+    async def upsert_tag(self, tag: EcosystemTag) -> EcosystemTag:
+        """按 name 唯一键 upsert 标签。已存在则更新非主键字段。"""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemTagModel).where(EcosystemTagModel.name == tag.name)
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(EcosystemTagModel.from_pydantic(tag))
+            else:
+                row.aliases = tag.aliases
+                row.category = tag.category.value
+                row.description = tag.description
+        return tag
+
+    async def get_tag_by_name(self, name: str) -> EcosystemTag | None:
+        """按名称获取标签。"""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemTagModel).where(EcosystemTagModel.name == name)
+            )
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def get_tag(self, tag_id: str) -> EcosystemTag | None:
+        """按 id 获取标签。"""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemTagModel).where(EcosystemTagModel.id == tag_id)
+            )
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def list_tags(
+        self, category: str = "", limit: int = 200
+    ) -> list[EcosystemTag]:
+        """列出标签，可按 category 过滤。"""
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemTagModel)
+            if category:
+                stmt = stmt.where(EcosystemTagModel.category == category)
+            stmt = stmt.order_by(EcosystemTagModel.name).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # Ecosystem repo-tag associations
+    # ================================================================
+
+    async def add_repo_tag(
+        self,
+        repo_tag: EcosystemRepoTag,
+        project_id: str | None = None,
+    ) -> EcosystemRepoTag:
+        """添加仓-标签关联，已存在则更新 confidence/source/agent_id（应用层 upsert）。
+
+        Args:
+            project_id: 显式作用域；空时回退到 _project_scope/repo_tag.project_id。
+        """
+        effective_pid = self._effective_project_id(project_id) or repo_tag.project_id
+        if effective_pid and not repo_tag.project_id:
+            repo_tag.project_id = effective_pid
+
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemRepoTagModel).where(
+                    EcosystemRepoTagModel.repo_id == repo_tag.repo_id,
+                    EcosystemRepoTagModel.tag_id == repo_tag.tag_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(EcosystemRepoTagModel.from_pydantic(repo_tag))
+            else:
+                row.confidence = repo_tag.confidence
+                row.source = repo_tag.source.value
+                row.agent_id = repo_tag.agent_id
+                if effective_pid and not row.project_id:
+                    row.project_id = effective_pid
+        return repo_tag
+
+    async def remove_repo_tag(
+        self,
+        repo_id: str,
+        tag_id: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """移除仓-标签关联，返回是否实际删除了记录。"""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoTagModel).where(
+                EcosystemRepoTagModel.repo_id == repo_id,
+                EcosystemRepoTagModel.tag_id == tag_id,
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemRepoTagModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
+            return True
+
+    async def delete_repo_tags_by_sources(
+        self,
+        repo_id: str,
+        sources: list[str],
+        project_id: str | None = None,
+    ) -> int:
+        """Bulk-delete a repo's tag associations whose source is in ``sources``.
+
+        Used by ``apply_batch(replace_auto=True)`` to clear stale auto-generated
+        tags before re-applying. ``MANUAL`` and other sources are preserved.
+
+        Args:
+            repo_id: Target EcosystemRepoProfile.id.
+            sources: List of source values to delete (e.g. ["github_topic", "auto_rule"]).
+            project_id: Explicit project scope; falls back to repository scope.
+
+        Returns:
+            Number of rows actually deleted.
+        """
+        if not sources:
+            return 0
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoTagModel).where(
+                EcosystemRepoTagModel.repo_id == repo_id,
+                EcosystemRepoTagModel.source.in_(sources),
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemRepoTagModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            for row in rows:
+                await session.delete(row)
+            return len(rows)
+
+    async def list_repo_tags(
+        self,
+        repo_id: str = "",
+        tag_id: str = "",
+        limit: int = 200,
+        project_id: str | None = None,
+    ) -> list[EcosystemRepoTag]:
+        """列出仓-标签关联，按 repo_id 或 tag_id 过滤。
+
+        Args:
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoTagModel)
+            stmt = self._apply_project_filter(stmt, EcosystemRepoTagModel)
+            if project_id:
+                stmt = stmt.where(EcosystemRepoTagModel.project_id == project_id)
+            if repo_id:
+                stmt = stmt.where(EcosystemRepoTagModel.repo_id == repo_id)
+            if tag_id:
+                stmt = stmt.where(EcosystemRepoTagModel.tag_id == tag_id)
+            stmt = stmt.order_by(EcosystemRepoTagModel.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # Ecosystem relations (repo <-> repo)
+    # ================================================================
+
+    async def add_relation(
+        self,
+        relation: EcosystemRelation,
+        project_id: str | None = None,
+    ) -> EcosystemRelation:
+        """添加仓与仓的引用关系。
+
+        Args:
+            project_id: 显式作用域；空时回退到 _project_scope/relation.project_id。
+        """
+        effective_pid = self._effective_project_id(project_id) or relation.project_id
+        if effective_pid and not relation.project_id:
+            relation.project_id = effective_pid
+        async with get_session(self._db_url) as session:
+            session.add(EcosystemRelationModel.from_pydantic(relation))
+        return relation
+
+    async def list_relations(
+        self,
+        from_repo_id: str = "",
+        to_repo_id: str = "",
+        relation_type: str = "",
+        limit: int = 200,
+        project_id: str | None = None,
+    ) -> list[EcosystemRelation]:
+        """列出仓-仓关联，按起点 / 终点 / 类型过滤。
+
+        Args:
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRelationModel)
+            stmt = self._apply_project_filter(stmt, EcosystemRelationModel)
+            if project_id:
+                stmt = stmt.where(EcosystemRelationModel.project_id == project_id)
+            if from_repo_id:
+                stmt = stmt.where(EcosystemRelationModel.from_repo_id == from_repo_id)
+            if to_repo_id:
+                stmt = stmt.where(EcosystemRelationModel.to_repo_id == to_repo_id)
+            if relation_type:
+                stmt = stmt.where(EcosystemRelationModel.relation_type == relation_type)
+            stmt = stmt.order_by(EcosystemRelationModel.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    async def remove_relation(
+        self,
+        relation_id: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """删除一条关联记录。"""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRelationModel).where(
+                EcosystemRelationModel.id == relation_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemRelationModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
+            return True
+
+    # ================================================================
+    # Ecosystem scan runs
+    # ================================================================
+
+    async def create_scan_run(
+        self,
+        scan_run: EcosystemScanRun,
+        project_id: str | None = None,
+    ) -> EcosystemScanRun:
+        """创建一次扫描批次记录。
+
+        Args:
+            project_id: 显式作用域；空时回退到 _project_scope / scan_run.project_id。
+        """
+        effective_pid = self._effective_project_id(project_id) or scan_run.project_id
+        if effective_pid and not scan_run.project_id:
+            scan_run.project_id = effective_pid
+        async with get_session(self._db_url) as session:
+            session.add(EcosystemScanRunModel.from_pydantic(scan_run))
+        return scan_run
+
+    async def get_scan_run(
+        self,
+        scan_run_id: str,
+        project_id: str | None = None,
+    ) -> EcosystemScanRun | None:
+        """按 id 获取扫描批次。"""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemScanRunModel).where(
+                EcosystemScanRunModel.id == scan_run_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemScanRunModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def update_scan_run(
+        self,
+        scan_run_id: str,
+        **fields: Any,
+    ) -> EcosystemScanRun | None:
+        """部分更新扫描批次字段。fields 中的 enum 自动转 .value。
+
+        作用域非空时只允许更新同项目下的行。
+        """
+        effective_pid = self._effective_project_id(None)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemScanRunModel).where(
+                EcosystemScanRunModel.id == scan_run_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(
+                    EcosystemScanRunModel.project_id == effective_pid
+                )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            for key, value in fields.items():
+                if hasattr(value, "value"):
+                    value = value.value  # noqa: PLW2901
+                if hasattr(row, key):
+                    setattr(row, key, value)
+            await session.flush()
+            return row.to_pydantic()
+
+    async def list_scan_runs(
+        self,
+        strategy: str = "",
+        limit: int = 50,
+        project_id: str | None = None,
+    ) -> list[EcosystemScanRun]:
+        """按 strategy 列出扫描批次，按 started_at 降序。
+
+        Args:
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemScanRunModel)
+            stmt = self._apply_project_filter(stmt, EcosystemScanRunModel)
+            if project_id:
+                stmt = stmt.where(EcosystemScanRunModel.project_id == project_id)
+            if strategy:
+                stmt = stmt.where(EcosystemScanRunModel.strategy == strategy)
+            stmt = stmt.order_by(EcosystemScanRunModel.started_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # Stage E: Ecosystem extended search & holistic detail
+    # ================================================================
+
+    async def search_ecosystem_profiles_extended(
+        self,
+        keyword: str = "",
+        topic: str = "",
+        min_stars: int = 0,
+        max_stars: int | None = None,
+        needs_deep_review: bool | None = None,
+        category: str = "",
+        language: str = "",
+        pushed_after: datetime | None = None,
+        is_archived: bool | None = None,
+        tags: list[str] | None = None,
+        tag_match_mode: str = "all",
+        sort: str = "stars",
+        limit: int = 50,
+        offset: int = 0,
+        project_id: str | None = None,
+    ) -> tuple[list[EcosystemRepoProfile], int]:
+        """Stage E 扩展检索：支持 tags / language / pushed_after / 多种排序。
+
+        参数：
+            tags: 标签名列表（按 EcosystemTag.name 匹配）。空 list / None 不过滤。
+            tag_match_mode: "all"（默认，AND 语义，所有 tag 必须存在）/ "any"（OR 语义）。
+            sort: "stars"（默认，stars desc）/ "recency"（pushed_at desc，nulls last）/ "relevance"（relevance_score desc）。
+            offset: 分页偏移，配合 limit 实现翻页。
+
+        返回 (profiles, total_count_before_limit)。
+        """
+        from sqlalchemy import and_, or_
+
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel)
+            stmt = self._apply_project_filter(stmt, EcosystemRepoProfileModel)
+            if project_id:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.project_id == project_id
+                )
+
+            # 基础字段过滤
+            if min_stars > 0:
+                stmt = stmt.where(EcosystemRepoProfileModel.stars >= min_stars)
+            if max_stars is not None and max_stars > 0:
+                stmt = stmt.where(EcosystemRepoProfileModel.stars <= max_stars)
+            if needs_deep_review is not None:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.needs_deep_review == needs_deep_review
+                )
+            if category:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.relevance_category == category
+                )
+            if language:
+                stmt = stmt.where(EcosystemRepoProfileModel.language == language)
+            if pushed_after is not None:
+                stmt = stmt.where(EcosystemRepoProfileModel.pushed_at >= pushed_after)
+            if is_archived is not None:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.is_archived == is_archived
+                )
+            if keyword:
+                kw = f"%{keyword}%"
+                stmt = stmt.where(
+                    or_(
+                        EcosystemRepoProfileModel.name.ilike(kw),
+                        EcosystemRepoProfileModel.description.ilike(kw),
+                        EcosystemRepoProfileModel.one_line_summary.ilike(kw),
+                        EcosystemRepoProfileModel.repo_full_name.ilike(kw),
+                        EcosystemRepoProfileModel.description_excerpt.ilike(kw),
+                    )
+                )
+            if topic:
+                tp = f"%{topic}%"
+                stmt = stmt.where(EcosystemRepoProfileModel.topics.ilike(tp))
+
+            # tags 过滤：通过 EXISTS subquery 实现 AND/OR
+            if tags:
+                # 解析 tag 名 -> tag_id
+                tag_ids: list[str] = []
+                tag_rows = await session.execute(
+                    select(EcosystemTagModel).where(EcosystemTagModel.name.in_(tags))
+                )
+                for t in tag_rows.scalars().all():
+                    tag_ids.append(t.id)
+
+                if not tag_ids:
+                    # 标签全不存在 -> 0 结果
+                    return ([], 0)
+
+                if tag_match_mode == "any":
+                    # OR 语义：repo 至少有一个匹配标签
+                    subq = (
+                        select(EcosystemRepoTagModel.repo_id)
+                        .where(EcosystemRepoTagModel.tag_id.in_(tag_ids))
+                    )
+                    stmt = stmt.where(EcosystemRepoProfileModel.id.in_(subq))
+                else:
+                    # AND 语义：每个 tag_id 都必须有对应 repo_tag 行
+                    for tid in tag_ids:
+                        subq = (
+                            select(EcosystemRepoTagModel.repo_id)
+                            .where(EcosystemRepoTagModel.tag_id == tid)
+                        )
+                        stmt = stmt.where(EcosystemRepoProfileModel.id.in_(subq))
+
+            # 计算 total（offset/limit 之前）
+            count_stmt = select(func.count()).select_from(stmt.subquery())
+            total_result = await session.execute(count_stmt)
+            total = int(total_result.scalar() or 0)
+
+            # 排序
+            if sort == "recency":
+                # SQLite 的 NULLS LAST 兼容做法：is null asc + value desc
+                stmt = stmt.order_by(
+                    EcosystemRepoProfileModel.pushed_at.is_(None).asc(),
+                    EcosystemRepoProfileModel.pushed_at.desc(),
+                    EcosystemRepoProfileModel.stars.desc(),
+                )
+            elif sort == "relevance":
+                stmt = stmt.order_by(
+                    EcosystemRepoProfileModel.relevance_score.desc(),
+                    EcosystemRepoProfileModel.stars.desc(),
+                )
+            else:  # default "stars"
+                stmt = stmt.order_by(EcosystemRepoProfileModel.stars.desc())
+
+            stmt = stmt.offset(max(offset, 0)).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return ([r.to_pydantic() for r in rows], total)
+
+    async def compute_ecosystem_facet_counts(
+        self,
+        keyword: str = "",
+        min_stars: int = 0,
+        max_stars: int | None = None,
+        category: str = "",
+        language: str = "",
+        is_archived: bool | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """计算 facet 聚合：在给定基础筛选下，统计 category / language / archived 的分布。
+
+        返回 {"category": {...}, "language": {...}, "archived": {"true": n, "false": n}}。
+
+        K1 perf: 三个 GROUP BY 共享一个 session + 单一 ``_apply_filters`` helper
+        消除原版的 cat_stmt dead-code 和 5 段重复 ``or_(...)``。GROUP BY 在 SQL 层
+        聚合比 fetch 全行后 Python 聚合在大表上更快（实测 50K 行 GROUP BY 132ms
+        vs Python 全 fetch 152ms）。
+        """
+        from sqlalchemy import or_
+
+        effective_pid = self._effective_project_id(project_id)
+
+        def _apply_filters(q):
+            """Apply common filters (project + stars + cat/lang/archived + keyword)."""
+            if effective_pid is not None:
+                q = q.where(
+                    EcosystemRepoProfileModel.project_id == effective_pid
+                )
+            if min_stars > 0:
+                q = q.where(EcosystemRepoProfileModel.stars >= min_stars)
+            if max_stars is not None and max_stars > 0:
+                q = q.where(EcosystemRepoProfileModel.stars <= max_stars)
+            if category:
+                q = q.where(
+                    EcosystemRepoProfileModel.relevance_category == category
+                )
+            if language:
+                q = q.where(EcosystemRepoProfileModel.language == language)
+            if is_archived is not None:
+                q = q.where(
+                    EcosystemRepoProfileModel.is_archived == is_archived
+                )
+            if keyword:
+                kw = f"%{keyword}%"
+                q = q.where(
+                    or_(
+                        EcosystemRepoProfileModel.name.ilike(kw),
+                        EcosystemRepoProfileModel.description.ilike(kw),
+                        EcosystemRepoProfileModel.one_line_summary.ilike(kw),
+                        EcosystemRepoProfileModel.repo_full_name.ilike(kw),
+                        EcosystemRepoProfileModel.description_excerpt.ilike(kw),
+                    )
+                )
+            return q
+
+        async with get_session(self._db_url) as session:
+            cat_q = _apply_filters(
+                select(
+                    EcosystemRepoProfileModel.relevance_category,
+                    func.count(EcosystemRepoProfileModel.id).label("cnt"),
+                )
+            ).group_by(EcosystemRepoProfileModel.relevance_category)
+            cat_result = await session.execute(cat_q)
+            category_counts: dict[str, int] = {}
+            for row in cat_result.all():
+                key = row[0] or "unknown"
+                category_counts[key] = int(row[1])
+
+            lang_q = _apply_filters(
+                select(
+                    EcosystemRepoProfileModel.language,
+                    func.count(EcosystemRepoProfileModel.id).label("cnt"),
+                )
+            ).group_by(EcosystemRepoProfileModel.language)
+            lang_result = await session.execute(lang_q)
+            language_counts: dict[str, int] = {}
+            for row in lang_result.all():
+                key = row[0] or "unknown"
+                language_counts[key] = int(row[1])
+
+            arch_q = _apply_filters(
+                select(
+                    EcosystemRepoProfileModel.is_archived,
+                    func.count(EcosystemRepoProfileModel.id).label("cnt"),
+                )
+            ).group_by(EcosystemRepoProfileModel.is_archived)
+            arch_result = await session.execute(arch_q)
+            archived_counts: dict[str, int] = {"true": 0, "false": 0}
+            for row in arch_result.all():
+                key = "true" if row[0] else "false"
+                archived_counts[key] = int(row[1])
+
+            return {
+                "category": category_counts,
+                "language": language_counts,
+                "archived": archived_counts,
+            }
+
+    async def get_ecosystem_profile_full(
+        self,
+        repo_full_name: str = "",
+        repo_id: str = "",
+        relations_limit: int = 50,
+        deep_reviews_limit: int = 20,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """全息获取仓档案：profile + tags(含名称) + deep_reviews + relations(from/to) + scan_run。
+
+        repo_full_name 与 repo_id 二选一（repo_id 优先）。
+        返回 None 当仓不存在。
+
+        Args:
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        # 1) 主档案
+        profile: EcosystemRepoProfile | None = None
+        if repo_id:
+            profile = await self.get_ecosystem_profile_by_id(
+                repo_id, project_id=project_id
+            )
+        elif repo_full_name:
+            profile = await self.get_ecosystem_profile(
+                repo_full_name, project_id=project_id
+            )
+        if profile is None:
+            return None
+
+        # 2) tags（join EcosystemTag 取名称 + category）
+        async with get_session(self._db_url) as session:
+            tag_join = await session.execute(
+                select(EcosystemRepoTagModel, EcosystemTagModel)
+                .join(
+                    EcosystemTagModel,
+                    EcosystemTagModel.id == EcosystemRepoTagModel.tag_id,
+                )
+                .where(EcosystemRepoTagModel.repo_id == profile.id)
+                .order_by(EcosystemTagModel.name)
+            )
+            tags_payload: list[dict[str, Any]] = []
+            for repo_tag, tag in tag_join.all():
+                tags_payload.append(
+                    {
+                        "tag_id": tag.id,
+                        "name": tag.name,
+                        "category": tag.category,
+                        "aliases": tag.aliases or [],
+                        "description": tag.description,
+                        "confidence": repo_tag.confidence,
+                        "source": repo_tag.source,
+                        "agent_id": repo_tag.agent_id,
+                        "created_at": (
+                            repo_tag.created_at.isoformat()
+                            if repo_tag.created_at
+                            else None
+                        ),
+                    }
+                )
+
+        # 3) deep reviews（带 project 作用域）
+        deep_reviews = await self.list_deep_reviews(
+            repo_id=profile.id,
+            limit=deep_reviews_limit,
+            project_id=project_id,
+        )
+
+        # 4) relations from + to（含目标仓简要信息）
+        async with get_session(self._db_url) as session:
+            from_rows = await session.execute(
+                select(EcosystemRelationModel, EcosystemRepoProfileModel)
+                .outerjoin(
+                    EcosystemRepoProfileModel,
+                    EcosystemRepoProfileModel.id
+                    == EcosystemRelationModel.to_repo_id,
+                )
+                .where(EcosystemRelationModel.from_repo_id == profile.id)
+                .order_by(EcosystemRelationModel.created_at.desc())
+                .limit(relations_limit)
+            )
+            relations_from: list[dict[str, Any]] = []
+            for rel, target in from_rows.all():
+                relations_from.append(
+                    {
+                        "relation_id": rel.id,
+                        "relation_type": rel.relation_type,
+                        "to_repo_id": rel.to_repo_id,
+                        "to_repo_full_name": (
+                            target.repo_full_name if target else None
+                        ),
+                        "to_repo_stars": target.stars if target else None,
+                        "evidence": rel.evidence,
+                        "confidence": rel.confidence,
+                        "agent_id": rel.agent_id,
+                    }
+                )
+
+            to_rows = await session.execute(
+                select(EcosystemRelationModel, EcosystemRepoProfileModel)
+                .outerjoin(
+                    EcosystemRepoProfileModel,
+                    EcosystemRepoProfileModel.id
+                    == EcosystemRelationModel.from_repo_id,
+                )
+                .where(EcosystemRelationModel.to_repo_id == profile.id)
+                .order_by(EcosystemRelationModel.created_at.desc())
+                .limit(relations_limit)
+            )
+            relations_to: list[dict[str, Any]] = []
+            for rel, source in to_rows.all():
+                relations_to.append(
+                    {
+                        "relation_id": rel.id,
+                        "relation_type": rel.relation_type,
+                        "from_repo_id": rel.from_repo_id,
+                        "from_repo_full_name": (
+                            source.repo_full_name if source else None
+                        ),
+                        "from_repo_stars": source.stars if source else None,
+                        "evidence": rel.evidence,
+                        "confidence": rel.confidence,
+                        "agent_id": rel.agent_id,
+                    }
+                )
+
+        # 5) scan_run（带 project 作用域）
+        scan_run = None
+        if profile.scan_run_id:
+            scan_run = await self.get_scan_run(
+                profile.scan_run_id, project_id=project_id
+            )
+
+        return {
+            "profile": profile,
+            "tags": tags_payload,
+            "deep_reviews": deep_reviews,
+            "relations_from": relations_from,
+            "relations_to": relations_to,
+            "scan_run": scan_run,
+        }
+
+    # ================================================================
+    # Stage J: 项目隔离 backfill
+    # ================================================================
+
+    async def backfill_ecosystem_to_project(
+        self, project_id: str
+    ) -> dict[str, int]:
+        """把所有 project_id IS NULL 的 ecosystem 数据迁移至指定项目。
+
+        覆盖 5 张数据表：profiles / scan_runs / deep_reviews / repo_tags / relations。
+        EcosystemTag 字典保持 NULL（全局共用）。
+
+        幂等：已有 project_id 的行不动；只迁移 NULL 行。
+
+        Args:
+            project_id: 目标项目 id（必须存在于 projects 表）。
+
+        Returns:
+            每张表实际迁移行数的字典。
+        """
+        from sqlalchemy import update
+
+        if not project_id:
+            raise ValueError("project_id 不能为空")
+
+        async with get_session(self._db_url) as session:
+            # 校验目标项目存在
+            existing_project = await session.execute(
+                select(ProjectModel).where(ProjectModel.id == project_id)
+            )
+            if existing_project.scalar_one_or_none() is None:
+                raise ValueError(f"项目 {project_id} 不存在")
+
+            counts: dict[str, int] = {}
+            tables = [
+                ("ecosystem_repo_profiles", EcosystemRepoProfileModel),
+                ("ecosystem_scan_runs", EcosystemScanRunModel),
+                ("ecosystem_deep_reviews", EcosystemDeepReviewModel),
+                ("ecosystem_repo_tags", EcosystemRepoTagModel),
+                ("ecosystem_relations", EcosystemRelationModel),
+            ]
+            for label, model in tables:
+                stmt = (
+                    update(model)
+                    .where(model.project_id.is_(None))
+                    .values(project_id=project_id)
+                )
+                result = await session.execute(stmt)
+                counts[label] = int(result.rowcount or 0)
+
+            return counts

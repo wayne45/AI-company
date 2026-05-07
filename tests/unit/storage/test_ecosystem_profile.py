@@ -224,3 +224,91 @@ async def test_search_returns_sorted_by_stars_desc(repo: StorageRepository) -> N
     results = await repo.search_ecosystem_profiles(limit=10)
     star_values = [p.stars for p in results]
     assert star_values == sorted(star_values, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Stage B 扩展字段 (4 cases)
+# ---------------------------------------------------------------------------
+
+
+async def test_stage_b_fields_persist_on_create(repo: StorageRepository) -> None:
+    """新增的 4 个 Stage B 字段创建时能完整保存。"""
+    pushed = datetime.now(tz=timezone.utc)
+    profile = EcosystemRepoProfile(
+        repo_full_name="owner/active-repo",
+        name="active-repo",
+        owner="owner",
+        stars=2000,
+        last_scanned_at=datetime.now(tz=timezone.utc),
+        pushed_at=pushed,
+        is_archived=False,
+        scan_run_id="scan-001",
+        description_excerpt="一个活跃的测试仓",
+    )
+    await repo.upsert_ecosystem_profile(profile)
+
+    fetched = await repo.get_ecosystem_profile("owner/active-repo")
+    assert fetched is not None
+    assert fetched.pushed_at is not None
+    # SQLite 存储后 datetime 可能丢失 tz，使用 naive 转换比较
+    pushed_naive = pushed.replace(tzinfo=None)
+    fetched_pushed_naive = fetched.pushed_at.replace(tzinfo=None) if fetched.pushed_at.tzinfo else fetched.pushed_at
+    assert abs((fetched_pushed_naive - pushed_naive).total_seconds()) < 1
+    assert fetched.is_archived is False
+    assert fetched.scan_run_id == "scan-001"
+    assert fetched.description_excerpt == "一个活跃的测试仓"
+
+
+async def test_stage_b_fields_updatable_on_upsert(repo: StorageRepository) -> None:
+    """二次 upsert 时新字段可被更新（如标 is_archived）。"""
+    profile = EcosystemRepoProfile(
+        repo_full_name="owner/aging-repo",
+        name="aging-repo",
+        owner="owner",
+        stars=1000,
+        last_scanned_at=datetime.now(tz=timezone.utc),
+        is_archived=False,
+        scan_run_id="scan-001",
+    )
+    await repo.upsert_ecosystem_profile(profile)
+
+    updated = profile.model_copy(
+        update={
+            "is_archived": True,
+            "scan_run_id": "scan-002",
+            "description_excerpt": "deprecated repo",
+            "last_scanned_at": datetime.now(tz=timezone.utc),
+        }
+    )
+    await repo.upsert_ecosystem_profile(updated)
+
+    fetched = await repo.get_ecosystem_profile("owner/aging-repo")
+    assert fetched is not None
+    assert fetched.is_archived is True
+    assert fetched.scan_run_id == "scan-002"
+    assert fetched.description_excerpt == "deprecated repo"
+
+
+async def test_stage_b_default_values_on_legacy_data(repo: StorageRepository) -> None:
+    """未显式设置 Stage B 字段时使用默认值。"""
+    profile = _make_profile("owner/legacy-repo", stars=8000)
+    await repo.upsert_ecosystem_profile(profile)
+
+    fetched = await repo.get_ecosystem_profile("owner/legacy-repo")
+    assert fetched is not None
+    assert fetched.pushed_at is None
+    assert fetched.is_archived is False
+    assert fetched.scan_run_id is None
+    assert fetched.description_excerpt == ""
+
+
+async def test_get_ecosystem_profile_by_id_roundtrip(repo: StorageRepository) -> None:
+    """get_ecosystem_profile_by_id 能按主键取回。"""
+    profile = _make_profile("owner/by-id-test", stars=12000)
+    await repo.upsert_ecosystem_profile(profile)
+
+    fetched_by_name = await repo.get_ecosystem_profile("owner/by-id-test")
+    assert fetched_by_name is not None
+    fetched_by_id = await repo.get_ecosystem_profile_by_id(fetched_by_name.id)
+    assert fetched_by_id is not None
+    assert fetched_by_id.repo_full_name == "owner/by-id-test"

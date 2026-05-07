@@ -9,7 +9,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from aiteam.types import (
@@ -19,9 +29,21 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    DemoResult,
+    EcosystemDeepReview,
+    EcosystemDeepReviewStatus,
+    EcosystemRelation,
+    EcosystemRelationType,
     EcosystemRepoProfile,
+    EcosystemRepoTag,
+    EcosystemScanRun,
+    EcosystemScanStrategy,
+    EcosystemTag,
+    EcosystemTagCategory,
+    EcosystemTagSource,
     Event,
     EventType,
+    IntegrationRecommendation,
     LeaderBriefing,
     Meeting,
     MeetingMessage,
@@ -894,12 +916,55 @@ class PipelineStageHistoryModel(Base):
 
 
 class EcosystemRepoProfileModel(Base):
-    """Claude 生态仓档案 — 支持广索引检索 + 周期更新。"""
+    """Claude 生态仓档案 — 支持广索引检索 + 周期更新。
+
+    项目隔离：每个 project_id 拥有独立的仓快照（同一仓在不同项目下是不同行）。
+    历史数据 project_id=NULL 视为"全局/未归属"，迁移时 backfill 至默认项目。
+    """
 
     __tablename__ = "ecosystem_repo_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "repo_full_name",
+            name="uq_ecosystem_profiles_project_repo",
+        ),
+        # K1 perf indexes — composite covers (project filter + sort) hot paths.
+        Index(
+            "ix_ecosystem_profiles_project_stars",
+            "project_id",
+            "stars",
+        ),
+        Index(
+            "ix_ecosystem_profiles_project_category_stars",
+            "project_id",
+            "relevance_category",
+            "stars",
+        ),
+        Index(
+            "ix_ecosystem_profiles_project_lang_stars",
+            "project_id",
+            "language",
+            "stars",
+        ),
+        Index(
+            "ix_ecosystem_profiles_project_pushed",
+            "project_id",
+            "pushed_at",
+        ),
+        Index(
+            "ix_ecosystem_profiles_project_archived_stars",
+            "project_id",
+            "is_archived",
+            "stars",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    repo_full_name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    repo_full_name: Mapped[str] = mapped_column(String(200), index=True)
     name: Mapped[str] = mapped_column(String(200))
     owner: Mapped[str] = mapped_column(String(100), index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -918,6 +983,11 @@ class EcosystemRepoProfileModel(Base):
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(tz=timezone.utc)
     )
+    # Stage B 扩展字段
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    scan_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    description_excerpt: Mapped[str] = mapped_column(Text, default="")
 
     def to_pydantic(self) -> EcosystemRepoProfile:
         """Convert to Pydantic model."""
@@ -932,6 +1002,7 @@ class EcosystemRepoProfileModel(Base):
 
         return EcosystemRepoProfile(
             id=self.id,
+            project_id=self.project_id,
             repo_full_name=self.repo_full_name,
             name=self.name,
             owner=self.owner,
@@ -947,6 +1018,10 @@ class EcosystemRepoProfileModel(Base):
             one_line_summary=self.one_line_summary,
             last_scanned_at=self.last_scanned_at,
             first_seen_at=self.first_seen_at,
+            pushed_at=self.pushed_at,
+            is_archived=bool(self.is_archived) if self.is_archived is not None else False,
+            scan_run_id=self.scan_run_id,
+            description_excerpt=self.description_excerpt or "",
         )
 
     @classmethod
@@ -956,6 +1031,7 @@ class EcosystemRepoProfileModel(Base):
 
         return cls(
             id=p.id,
+            project_id=p.project_id,
             repo_full_name=p.repo_full_name,
             name=p.name,
             owner=p.owner,
@@ -971,4 +1047,309 @@ class EcosystemRepoProfileModel(Base):
             one_line_summary=p.one_line_summary,
             last_scanned_at=p.last_scanned_at,
             first_seen_at=p.first_seen_at,
+            pushed_at=p.pushed_at,
+            is_archived=p.is_archived,
+            scan_run_id=p.scan_run_id,
+            description_excerpt=p.description_excerpt or "",
+        )
+
+
+# ============================================================
+# Ecosystem Stage B — 5 个扩展表
+# ============================================================
+
+
+class EcosystemDeepReviewModel(Base):
+    """生态仓深扫报告 ORM 模型。
+
+    项目隔离：每个 project_id 拥有独立的深扫报告。
+    历史数据 project_id=NULL，迁移时 backfill 至默认项目。
+    """
+
+    __tablename__ = "ecosystem_deep_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    summary_md: Mapped[str] = mapped_column(Text, default="")
+    architecture_md: Mapped[str] = mapped_column(Text, default="")
+    demo_result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    demo_log_excerpt: Mapped[str] = mapped_column(Text, default="")
+    risks_md: Mapped[str] = mapped_column(Text, default="")
+    learnings_md: Mapped[str] = mapped_column(Text, default="")
+    integration_recommendation: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    report_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    dispatch_prompt: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> EcosystemDeepReview:
+        """Convert to Pydantic model."""
+        return EcosystemDeepReview(
+            id=self.id,
+            project_id=self.project_id,
+            repo_id=self.repo_id,
+            status=EcosystemDeepReviewStatus(self.status),
+            agent_id=self.agent_id,
+            summary_md=self.summary_md or "",
+            architecture_md=self.architecture_md or "",
+            demo_result=DemoResult(self.demo_result) if self.demo_result else None,
+            demo_log_excerpt=self.demo_log_excerpt or "",
+            risks_md=self.risks_md or "",
+            learnings_md=self.learnings_md or "",
+            integration_recommendation=(
+                IntegrationRecommendation(self.integration_recommendation)
+                if self.integration_recommendation
+                else None
+            ),
+            report_id=self.report_id,
+            dispatch_prompt=self.dispatch_prompt or "",
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            duration_seconds=self.duration_seconds or 0.0,
+            created_at=self.created_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemDeepReview) -> "EcosystemDeepReviewModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            project_id=p.project_id,
+            repo_id=p.repo_id,
+            status=p.status.value,
+            agent_id=p.agent_id,
+            summary_md=p.summary_md,
+            architecture_md=p.architecture_md,
+            demo_result=p.demo_result.value if p.demo_result else None,
+            demo_log_excerpt=p.demo_log_excerpt,
+            risks_md=p.risks_md,
+            learnings_md=p.learnings_md,
+            integration_recommendation=(
+                p.integration_recommendation.value if p.integration_recommendation else None
+            ),
+            report_id=p.report_id,
+            dispatch_prompt=p.dispatch_prompt,
+            started_at=p.started_at,
+            completed_at=p.completed_at,
+            duration_seconds=p.duration_seconds,
+            created_at=p.created_at,
+        )
+
+
+class EcosystemTagModel(Base):
+    """能力标签字典 ORM 模型。"""
+
+    __tablename__ = "ecosystem_tags"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    category: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> EcosystemTag:
+        """Convert to Pydantic model."""
+        return EcosystemTag(
+            id=self.id,
+            name=self.name,
+            aliases=self.aliases if isinstance(self.aliases, list) else [],
+            category=EcosystemTagCategory(self.category),
+            description=self.description or "",
+            created_at=self.created_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemTag) -> "EcosystemTagModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            name=p.name,
+            aliases=p.aliases,
+            category=p.category.value,
+            description=p.description,
+            created_at=p.created_at,
+        )
+
+
+class EcosystemRepoTagModel(Base):
+    """仓-标签多对多关联 ORM 模型。
+
+    项目隔离：每个 project_id 内部 (repo_id, tag_id) 唯一；不同项目可独立持有同一关联。
+    实践中 repo 已经是 per-project，因此 (repo_id, tag_id) 全表唯一也成立。
+    """
+
+    __tablename__ = "ecosystem_repo_tags"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    tag_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    __table_args__ = (
+        UniqueConstraint("repo_id", "tag_id", name="uq_ecosystem_repo_tags_repo_tag"),
+    )
+
+    def to_pydantic(self) -> EcosystemRepoTag:
+        """Convert to Pydantic model."""
+        return EcosystemRepoTag(
+            id=self.id,
+            project_id=self.project_id,
+            repo_id=self.repo_id,
+            tag_id=self.tag_id,
+            confidence=self.confidence if self.confidence is not None else 1.0,
+            source=EcosystemTagSource(self.source),
+            agent_id=self.agent_id,
+            created_at=self.created_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemRepoTag) -> "EcosystemRepoTagModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            project_id=p.project_id,
+            repo_id=p.repo_id,
+            tag_id=p.tag_id,
+            confidence=p.confidence,
+            source=p.source.value,
+            agent_id=p.agent_id,
+            created_at=p.created_at,
+        )
+
+
+class EcosystemRelationModel(Base):
+    """仓与仓的关联关系 ORM 模型。
+
+    项目隔离：仓与仓的关系是项目内部的研究产出，不跨项目共享。
+    历史数据 project_id=NULL，迁移时 backfill 至默认项目。
+    """
+
+    __tablename__ = "ecosystem_relations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    from_repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    to_repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    relation_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> EcosystemRelation:
+        """Convert to Pydantic model."""
+        return EcosystemRelation(
+            id=self.id,
+            project_id=self.project_id,
+            from_repo_id=self.from_repo_id,
+            to_repo_id=self.to_repo_id,
+            relation_type=EcosystemRelationType(self.relation_type),
+            evidence=self.evidence or "",
+            confidence=self.confidence if self.confidence is not None else 1.0,
+            agent_id=self.agent_id,
+            created_at=self.created_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemRelation) -> "EcosystemRelationModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            project_id=p.project_id,
+            from_repo_id=p.from_repo_id,
+            to_repo_id=p.to_repo_id,
+            relation_type=p.relation_type.value,
+            evidence=p.evidence,
+            confidence=p.confidence,
+            agent_id=p.agent_id,
+            created_at=p.created_at,
+        )
+
+
+class EcosystemScanRunModel(Base):
+    """扫描批次记录 ORM 模型。
+
+    项目隔离：每个 project_id 拥有独立的扫描历史。
+    历史数据 project_id=NULL，迁移时 backfill 至默认项目。
+    """
+
+    __tablename__ = "ecosystem_scan_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    strategy: Mapped[str] = mapped_column(String(20), nullable=False, default="incremental")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    repos_added: Mapped[int] = mapped_column(Integer, default=0)
+    repos_updated: Mapped[int] = mapped_column(Integer, default=0)
+    repos_skipped: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    triggered_by: Mapped[str] = mapped_column(String(20), default="manual")
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    def to_pydantic(self) -> EcosystemScanRun:
+        """Convert to Pydantic model."""
+        return EcosystemScanRun(
+            id=self.id,
+            project_id=self.project_id,
+            strategy=EcosystemScanStrategy(self.strategy),
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            duration_seconds=self.duration_seconds or 0.0,
+            repos_added=self.repos_added or 0,
+            repos_updated=self.repos_updated or 0,
+            repos_skipped=self.repos_skipped or 0,
+            errors=self.errors if isinstance(self.errors, list) else [],
+            notes=self.notes or "",
+            triggered_by=self.triggered_by or "manual",
+            agent_id=self.agent_id,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemScanRun) -> "EcosystemScanRunModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            project_id=p.project_id,
+            strategy=p.strategy.value,
+            started_at=p.started_at,
+            completed_at=p.completed_at,
+            duration_seconds=p.duration_seconds,
+            repos_added=p.repos_added,
+            repos_updated=p.repos_updated,
+            repos_skipped=p.repos_skipped,
+            errors=p.errors,
+            notes=p.notes,
+            triggered_by=p.triggered_by,
+            agent_id=p.agent_id,
         )

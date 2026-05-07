@@ -53,13 +53,20 @@ _session_project_id: str = ""
 # ============================================================
 
 
-def _api_call(method: str, path: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+def _api_call(
+    method: str,
+    path: str,
+    data: dict[str, Any] | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Unified API call helper using urllib standard library.
 
     Args:
         method: HTTP method (GET / POST / PUT / DELETE)
         path: API path, e.g., /api/teams
         data: Request body data (used for POST/PUT only)
+        extra_headers: Additional headers to merge into the request
+            (e.g. {"X-Project-Id": "..."} for ecosystem project scoping).
 
     Returns:
         API response as a JSON dict
@@ -68,8 +75,13 @@ def _api_call(method: str, path: str, data: dict[str, Any] | None = None) -> dic
     headers = {"Content-Type": "application/json"}
     if PROJECT_DIR:
         headers["X-Project-Dir"] = PROJECT_DIR
-    # Project scope is NOT injected here — it caused infinite recursion.
-    # Each MCP tool that needs project scope calls _resolve_project_id() itself.
+    # Stage J: auto-inject session-resolved X-Project-Id (read once at startup
+    # via _init_session_project, no recursion risk). Subordinate to extra_headers
+    # so callers can still override (e.g. cross-project tools force a different id).
+    if _session_project_id:
+        headers.setdefault("X-Project-Id", _session_project_id)
+    if extra_headers:
+        headers.update(extra_headers)
 
     body_bytes = None
     if data is not None:

@@ -16,6 +16,7 @@ export const en: Translations = {
     pipelines: 'Pipelines',
     failures: 'Failure Analysis',
     prompts: 'Prompt Registry',
+    ecosystem: 'Ecosystem',
     settings: 'Settings',
   },
   status: {

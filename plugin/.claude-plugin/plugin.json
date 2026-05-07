@@ -1,7 +1,7 @@
 {
   "name": "ai-team-os",
-  "version": "1.3.4",
-  "description": "AI Agent Team Operating System for Claude Code with 108 MCP tools, 40+ agent templates, and 10 lifecycle hooks. Persistent team management, structured meetings, task wall with pipeline workflows, company loop engine for autonomous operation, and real-time React dashboard.",
+  "version": "1.4.0",
+  "description": "AI Agent Team Operating System for Claude Code with 140+ MCP tools (incl. 30+ ecosystem research tools), 40+ agent templates, 11+ lifecycle hooks. Persistent team management, structured meetings, task wall with pipeline workflows, company loop engine, real-time React dashboard, and Ecosystem Research Platform (project-isolated GitHub repo index with multi-layer tagging, deep-review workflow, and weekly auto-summary).",
   "author": {
     "name": "CronusL-1141",
     "url": "https://github.com/CronusL-1141"

@@ -124,6 +124,18 @@ CEO 从不空闲。它按任务墙优先级持续推进工作：
 - MCP 工具、Hooks 和 Agent 模板全部本地运行
 - 完全复用你的 CC 套餐
 
+### 8. 生态研究平台（1.4.0 新增）
+
+针对 Claude / MCP / Agent 开源生态的项目隔离发现 + 打标 + 深度审查工作流：
+
+- **周期 GitHub 扫描**：cron 驱动增量扫描 + 多策略过滤（topic 搜索 / owner 黑名单 / 关键词白名单），通过 `EcosystemScanRun` 审计 + GitHub API 优雅降级
+- **三层自动打标**：Layer 1 GitHub topics 直接映射 / Layer 2 关键词+语言+docs-only 规则 / Layer 3 LLM dispatch_plan 派子 agent（最多 20 并发）。188 仓基线：平均 2.05 tags/repo，0 标签率仅 1.5%
+- **多维搜索**：11 个参数（query / tags AND / min_stars / language / sort_by / has_deep_review 等）+ 5 个复合索引 — 265 仓 search p95 < 15ms
+- **深度审查工作流**：5 段式报告模板（真实定位 / 架构 / 借鉴点 / 风险 / 集成建议），`ecosystem_deep_review_request` 派 Explore + 后端 agent，`PostToolUse` hook 自动关联已保存报告
+- **自动汇总**：4 个 markdown 工具（周报 / 按标签 / Top N / 平台自检）+ 自动 `report_save` 入档便于 Dashboard 渲染
+- **项目隔离**：每个项目有自己的 ecosystem 仓集合；通过 `X-Project-Id` HTTP header 路由；21 个 seed 标签字典全局共享
+- **Dashboard `/ecosystem` 页面**：列表带筛选 + 详情页消费 v2 API + 4 个新组件（CapabilityTags / DeepReviewSection / RelationsSection / ScanRunSection）
+
 ---
 
 ## 它构建了自己

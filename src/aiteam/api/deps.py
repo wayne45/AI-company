@@ -106,8 +106,15 @@ async def _run_migrations(db_url: str | None = None) -> None:
         ("events", "state_snapshot", "JSON"),
         # v1.0 P2: agent trust scoring
         ("agents", "trust_score", "REAL DEFAULT 0.5"),
+        # Stage B: ecosystem_repo_profiles 扩展字段
+        ("ecosystem_repo_profiles", "pushed_at", "DATETIME"),
+        ("ecosystem_repo_profiles", "is_archived", "BOOLEAN DEFAULT 0"),
+        ("ecosystem_repo_profiles", "scan_run_id", "VARCHAR(36)"),
+        ("ecosystem_repo_profiles", "description_excerpt", "TEXT DEFAULT ''"),
     ]
     # v1.0 P1-6: channel_messages table (created via create_all, no ALTER needed)
+    # Stage B: ecosystem_deep_reviews / ecosystem_tags / ecosystem_repo_tags /
+    # ecosystem_relations / ecosystem_scan_runs 由 create_all 自动建表
 
     async with engine.connect() as conn:
         for table_name, col_name, col_type in migrations:
@@ -187,6 +194,119 @@ async def _run_migrations(db_url: str | None = None) -> None:
             logger.info("Migration: tasks table rebuild complete")
 
         await conn.commit()
+
+
+_DEFAULT_ECOSYSTEM_TAGS: list[tuple[str, str, str]] = [
+    # capability
+    ("memory_system", "capability", "记忆 / 长期上下文系统"),
+    ("skill_system", "capability", "Skill / 技能注入系统"),
+    ("agent_orchestration", "capability", "多 Agent 编排"),
+    ("mcp_server", "capability", "MCP Server 实现"),
+    ("mcp_framework", "capability", "MCP 框架 / SDK (用于构建 MCP)"),
+    ("tool_use", "capability", "工具调用相关"),
+    ("workflow_engine", "capability", "工作流引擎"),
+    ("multi_agent", "capability", "多 Agent 协作系统"),
+    ("single_agent", "capability", "单 Agent 系统"),
+    ("claude_code", "capability", "Claude Code 生态 (skills/hooks/agents)"),
+    ("agent_harness", "capability", "Agent 运行时 / 框架外壳"),
+    # tech_stack
+    ("python", "tech_stack", "Python 实现"),
+    ("typescript", "tech_stack", "TypeScript 实现"),
+    ("javascript", "tech_stack", "JavaScript 实现"),
+    ("java", "tech_stack", "Java 实现"),
+    ("rust", "tech_stack", "Rust 实现"),
+    ("go", "tech_stack", "Go 实现"),
+    # maturity
+    ("official_anthropic", "maturity", "Anthropic 官方项目"),
+    ("battle_tested", "maturity", "已经过实战检验"),
+    ("experimental", "maturity", "实验性 / 尝鲜阶段"),
+    # positioning
+    ("framework", "positioning", "框架级项目"),
+    ("application", "positioning", "终端应用"),
+    ("library", "positioning", "工具库"),
+    ("plugin", "positioning", "插件 / 扩展"),
+    ("template", "positioning", "项目模板"),
+    ("docs_only", "positioning", "纯文档 / 教程 / awesome-list / cookbook"),
+]
+
+
+async def ensure_default_tags(repo: StorageRepository) -> None:
+    """启动时确保默认 21 个 EcosystemTag 存在 (INSERT OR IGNORE 语义)。
+
+    使用 upsert_tag 实现幂等：已存在则保留，不会覆盖人工修改的描述。
+    实际逻辑通过 get_tag_by_name 检查后才插入，避免覆盖。
+    """
+    from aiteam.types import EcosystemTag, EcosystemTagCategory
+
+    inserted = 0
+    for name, category, description in _DEFAULT_ECOSYSTEM_TAGS:
+        existing = await repo.get_tag_by_name(name)
+        if existing is not None:
+            continue
+        await repo.upsert_tag(
+            EcosystemTag(
+                name=name,
+                category=EcosystemTagCategory(category),
+                description=description,
+            )
+        )
+        inserted += 1
+    if inserted > 0:
+        logger.info("Ensured %d default ecosystem tags inserted", inserted)
+
+
+async def _backfill_ecosystem_default_project(repo: StorageRepository) -> None:
+    """Stage J 启动迁移：把历史 project_id IS NULL 的 ecosystem 行
+    回填到当前 cwd 匹配的项目，保证旧 188 仓在 "AI Team OS" 项目下仍可见。
+
+    选择规则：
+    1. 优先匹配 cwd 最长前缀的项目（与 _auto_create_projects 一致）；
+    2. 找不到时回退到首个项目；
+    3. 没有任何项目时跳过（数据保持 NULL，待项目创建后再次 backfill）。
+
+    幂等：仅迁移 NULL 行，已有 project_id 的行不动。
+    """
+    import os
+
+    try:
+        projects = await repo.list_projects()
+    except Exception as exc:
+        logger.warning("ecosystem backfill: list_projects failed: %s", exc)
+        return
+    if not projects:
+        logger.info("ecosystem backfill: no projects yet, skipping")
+        return
+
+    cwd = os.getcwd().replace("\\", "/").rstrip("/").lower()
+    target = None
+    best_len = -1
+    for p in projects:
+        rp = (p.root_path or "").replace("\\", "/").rstrip("/").lower()
+        if rp and (cwd == rp or cwd.startswith(rp + "/")) and len(rp) > best_len:
+            target = p
+            best_len = len(rp)
+    if target is None:
+        target = projects[0]
+
+    try:
+        counts = await repo.backfill_ecosystem_to_project(target.id)
+    except Exception as exc:
+        logger.warning("ecosystem backfill failed: %s", exc)
+        return
+
+    total = sum(counts.values())
+    if total > 0:
+        logger.info(
+            "Ecosystem backfill: migrated %d rows to project %s (%s)",
+            total,
+            target.name,
+            target.id[:8],
+        )
+        for k, v in counts.items():
+            if v > 0:
+                logger.info("  %s: %d", k, v)
+    else:
+        logger.info("Ecosystem backfill: no NULL rows to migrate")
 
 
 async def _auto_create_projects(repo: StorageRepository) -> None:
@@ -318,6 +438,16 @@ async def init_dependencies() -> None:
     # Auto-create Projects for Teams without project_id
     await _auto_create_projects(_repository)
 
+    # Ensure default ecosystem tags exist
+    await ensure_default_tags(_repository)
+
+    # Stage J: backfill legacy ecosystem rows to the default project
+    # so the existing 188 repos remain visible from "AI Team OS" project.
+    await _backfill_ecosystem_default_project(_repository)
+
+    # Stage J: refresh project_dir → project_id resolution cache
+    await refresh_project_dir_cache(_repository)
+
     # Start StateReaper background harvester
     _reaper = StateReaper(repo=_repository, event_bus=_event_bus)
     _reaper.start()
@@ -380,19 +510,76 @@ def get_global_repository() -> StorageRepository:
 
 
 def get_scoped_repository(request: Request) -> StorageRepository:
-    """Get a project-scoped StorageRepository using X-Project-Id header.
+    """Get a project-scoped StorageRepository.
 
-    When the caller provides X-Project-Id, all list/create operations on
-    project-aware tables are automatically filtered to that project.
-    Falls back to the global unscoped repository when the header is absent.
+    Resolution order:
+    1. X-Project-Id header (explicit project id, used by Dashboard / MCP).
+    2. X-Project-Dir header (path string, resolved to id via root_path
+       longest-prefix match). Used by MCP tools that only know the cwd.
+    3. Falls back to the global unscoped repository when neither is present.
+
+    When a project scope is resolved, all list/create operations on
+    project-aware tables (ecosystem 5 数据表 + tasks/teams/agents) are
+    automatically filtered to that project via _apply_project_filter.
     """
-    if _repository is None:
-        msg = "StorageRepository not initialized"
-        raise RuntimeError(msg)
+    # Delegate to get_repository() so FastAPI dependency overrides on
+    # get_repository (used by integration tests) still work.
+    base_repo = get_repository()
     project_id = request.headers.get("X-Project-Id", "")
     if not project_id:
-        return _repository
-    return StorageRepository(db_url=_repository._db_url, project_scope=project_id)
+        project_dir = request.headers.get("X-Project-Dir", "")
+        if project_dir:
+            project_id = _resolve_project_id_from_dir(project_dir)
+    if not project_id:
+        return base_repo
+    return StorageRepository(db_url=base_repo._db_url, project_scope=project_id)
+
+
+def _resolve_project_id_from_dir(project_dir: str) -> str:
+    """Resolve a project_id from a directory path via longest-prefix root_path match.
+
+    Returns "" when no project matches (caller falls back to unscoped repo).
+    Cached projects list is fetched lazily; tolerable cost since this only
+    runs when the caller did not already supply X-Project-Id.
+    """
+    if _repository is None or not project_dir:
+        return ""
+    try:
+        cwd = project_dir.replace("\\", "/").rstrip("/").lower()
+        # Best-effort sync read by leveraging asyncio loop.run_until_complete is
+        # unsafe inside FastAPI request context — instead we keep a tiny in-process
+        # cache populated by the lifespan startup hook.
+        cache = _project_dir_cache
+        if not cache:
+            return ""
+        best_id = ""
+        best_len = -1
+        for rp_lower, pid in cache.items():
+            if rp_lower and (cwd == rp_lower or cwd.startswith(rp_lower + "/")) and len(rp_lower) > best_len:
+                best_id = pid
+                best_len = len(rp_lower)
+        return best_id
+    except Exception:
+        return ""
+
+
+# Module-level cache: lower-cased root_path -> project_id, refreshed at startup.
+_project_dir_cache: dict[str, str] = {}
+
+
+async def refresh_project_dir_cache(repo: StorageRepository) -> None:
+    """Reload the project_dir → project_id cache from DB. Called at startup."""
+    try:
+        projects = await repo.list_projects()
+    except Exception:
+        return
+    new_cache: dict[str, str] = {}
+    for p in projects:
+        rp = (p.root_path or "").replace("\\", "/").rstrip("/").lower()
+        if rp:
+            new_cache[rp] = p.id
+    _project_dir_cache.clear()
+    _project_dir_cache.update(new_cache)
 
 
 def get_memory_store() -> MemoryStore:
