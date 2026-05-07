@@ -20,6 +20,7 @@ from aiteam.storage.models import (
     AgentModel,
     ChannelMessageModel,
     CrossMessageModel,
+    EcosystemRepoProfileModel,
     EventModel,
     LeaderBriefingModel,
     MeetingMessageModel,
@@ -41,6 +42,7 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    EcosystemRepoProfile,
     Event,
     EventType,
     LeaderBriefing,
@@ -2106,5 +2108,85 @@ class StorageRepository:
                 .order_by(PipelineStageHistoryModel.transitioned_at)
                 .limit(limit)
             )
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # Ecosystem repo profiles
+    # ================================================================
+
+    async def upsert_ecosystem_profile(self, profile: EcosystemRepoProfile) -> None:
+        """按 repo_full_name 唯一键 upsert 生态仓档案，更新动态字段。"""
+        import json
+        from datetime import timezone
+
+        now = profile.last_scanned_at
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemRepoProfileModel).where(
+                    EcosystemRepoProfileModel.repo_full_name == profile.repo_full_name
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                session.add(EcosystemRepoProfileModel.from_pydantic(profile))
+            else:
+                # Update dynamic fields; preserve first_seen_at
+                row.stars = profile.stars
+                row.description = profile.description
+                row.language = profile.language
+                row.topics = json.dumps(profile.topics) if profile.topics else None
+                row.homepage = profile.homepage
+                row.last_commit_at = profile.last_commit_at
+                row.needs_deep_review = profile.needs_deep_review
+                row.relevance_category = profile.relevance_category
+                row.relevance_score = profile.relevance_score
+                row.one_line_summary = profile.one_line_summary
+                row.last_scanned_at = now
+
+    async def search_ecosystem_profiles(
+        self,
+        keyword: str = "",
+        topic: str = "",
+        min_stars: int = 0,
+        max_stars: int | None = None,
+        needs_deep_review: bool | None = None,
+        category: str = "",
+        limit: int = 50,
+    ) -> list[EcosystemRepoProfile]:
+        """按字段筛选生态仓档案，支持关键词、topic、star 范围、深审标记。"""
+        from sqlalchemy import or_
+
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel)
+
+            if min_stars > 0:
+                stmt = stmt.where(EcosystemRepoProfileModel.stars >= min_stars)
+            if max_stars is not None and max_stars > 0:
+                stmt = stmt.where(EcosystemRepoProfileModel.stars <= max_stars)
+            if needs_deep_review is not None:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.needs_deep_review == needs_deep_review
+                )
+            if category:
+                stmt = stmt.where(
+                    EcosystemRepoProfileModel.relevance_category == category
+                )
+            if keyword:
+                kw = f"%{keyword}%"
+                stmt = stmt.where(
+                    or_(
+                        EcosystemRepoProfileModel.name.ilike(kw),
+                        EcosystemRepoProfileModel.description.ilike(kw),
+                        EcosystemRepoProfileModel.one_line_summary.ilike(kw),
+                        EcosystemRepoProfileModel.repo_full_name.ilike(kw),
+                    )
+                )
+            if topic:
+                tp = f"%{topic}%"
+                stmt = stmt.where(EcosystemRepoProfileModel.topics.ilike(tp))
+
+            stmt = stmt.order_by(EcosystemRepoProfileModel.stars.desc()).limit(limit)
+            result = await session.execute(stmt)
             rows = result.scalars().all()
             return [r.to_pydantic() for r in rows]

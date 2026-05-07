@@ -19,6 +19,7 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    EcosystemRepoProfile,
     Event,
     EventType,
     LeaderBriefing,
@@ -889,4 +890,85 @@ class PipelineStageHistoryModel(Base):
             transitioned_at=p.transitioned_at,
             triggered_by=p.triggered_by,
             reason=p.reason,
+        )
+
+
+class EcosystemRepoProfileModel(Base):
+    """Claude 生态仓档案 — 支持广索引检索 + 周期更新。"""
+
+    __tablename__ = "ecosystem_repo_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo_full_name: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    owner: Mapped[str] = mapped_column(String(100), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stars: Mapped[int] = mapped_column(Integer, index=True)
+    language: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    topics: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-serialized list
+    homepage: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    last_commit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    needs_deep_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    relevance_category: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    relevance_score: Mapped[int] = mapped_column(Integer, default=0)
+    one_line_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_scanned_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> EcosystemRepoProfile:
+        """Convert to Pydantic model."""
+        import json
+
+        topics_list: list[str] = []
+        if self.topics:
+            try:
+                topics_list = json.loads(self.topics)
+            except Exception:
+                topics_list = []
+
+        return EcosystemRepoProfile(
+            id=self.id,
+            repo_full_name=self.repo_full_name,
+            name=self.name,
+            owner=self.owner,
+            description=self.description,
+            stars=self.stars,
+            language=self.language,
+            topics=topics_list,
+            homepage=self.homepage,
+            last_commit_at=self.last_commit_at,
+            needs_deep_review=self.needs_deep_review,
+            relevance_category=self.relevance_category,
+            relevance_score=self.relevance_score,
+            one_line_summary=self.one_line_summary,
+            last_scanned_at=self.last_scanned_at,
+            first_seen_at=self.first_seen_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemRepoProfile) -> "EcosystemRepoProfileModel":
+        """Create an ORM instance from a Pydantic model."""
+        import json
+
+        return cls(
+            id=p.id,
+            repo_full_name=p.repo_full_name,
+            name=p.name,
+            owner=p.owner,
+            description=p.description,
+            stars=p.stars,
+            language=p.language,
+            topics=json.dumps(p.topics) if p.topics else None,
+            homepage=p.homepage,
+            last_commit_at=p.last_commit_at,
+            needs_deep_review=p.needs_deep_review,
+            relevance_category=p.relevance_category,
+            relevance_score=p.relevance_score,
+            one_line_summary=p.one_line_summary,
+            last_scanned_at=p.last_scanned_at,
+            first_seen_at=p.first_seen_at,
         )

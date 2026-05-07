@@ -497,6 +497,27 @@ class ChannelMessage(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class EcosystemRepoProfile(BaseModel):
+    """Claude 生态仓档案 — 广索引检索 + 周期更新。"""
+
+    id: str = Field(default_factory=_new_id)
+    repo_full_name: str  # "owner/repo"
+    name: str
+    owner: str
+    description: str | None = None
+    stars: int = 0
+    language: str | None = None
+    topics: list[str] = Field(default_factory=list)
+    homepage: str | None = None
+    last_commit_at: datetime | None = None
+    needs_deep_review: bool = False  # True when stars < 15000
+    relevance_category: str | None = None  # "agent-framework" / "mcp-server" / "memory-system" / "skill-system" / "tooling"
+    relevance_score: int = 0  # 0-10
+    one_line_summary: str | None = None
+    last_scanned_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
 # ============================================================
 # Result types
 # ============================================================

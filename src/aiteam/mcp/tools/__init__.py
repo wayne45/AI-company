@@ -8,6 +8,7 @@ from aiteam.mcp.tools import (
     briefing,
     cache,
     channels,
+    ecosystem,
     error_budget_tool,
     file_lock,
     git_ops,
@@ -50,6 +51,7 @@ _MODULES = [
     trust,
     watchdog,
     error_budget_tool,
+    ecosystem,
 ]
 
 # ============================================================

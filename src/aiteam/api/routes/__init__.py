@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from aiteam.api.routes.activities import router as activities_router
 from aiteam.api.routes.context import router as context_router
+from aiteam.api.routes.ecosystem import router as ecosystem_router
 from aiteam.api.routes.agent_templates import router as agent_templates_router
 from aiteam.api.routes.agents import router as agents_router
 from aiteam.api.routes.agents_config import router as agents_config_router
@@ -77,3 +78,4 @@ api_router.include_router(cache_router)
 api_router.include_router(trust_router)
 api_router.include_router(watchdog_router)
 api_router.include_router(error_budget_router)
+api_router.include_router(ecosystem_router)
