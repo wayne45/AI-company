@@ -427,6 +427,25 @@ class HookTranslator:
                 existing_team.id,
                 existing_team.status,
             )
+            # Auto-revive completed team if a new agent is joining — keeps
+            # team.status consistent with reality (busy member exists).
+            # Without this, agents end up "in a historical team" on the
+            # dashboard, which confused the user when ecosystem-indexer
+            # registered into a closed phase1-impl.
+            if existing_team.status == "completed":
+                await self.repo.update_team(existing_team.id, status="active")
+                logger.warning(
+                    "Team '%s' was completed; auto-revived to active because "
+                    "a new agent (cc_team_name=%s) is registering.",
+                    cc_team_name, cc_team_name,
+                )
+                await self.event_bus.emit(
+                    "team.auto_revived",
+                    f"team:{existing_team.id}",
+                    {"team_id": existing_team.id, "team_name": cc_team_name,
+                     "reason": "new agent registration on completed team"},
+                )
+                existing_team.status = "active"
             return existing_team
 
         # 2. Auto-create same-name OS team
