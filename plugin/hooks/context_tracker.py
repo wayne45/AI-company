@@ -10,44 +10,71 @@ No intermediate files, no statusline dependency, project isolation built-in
 Usage: python -m aiteam.hooks.context_tracker
 """
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
 DEFAULT_CONTEXT_SIZE = 200_000
 LARGE_CONTEXT_SIZE = 1_000_000
 _CLAUDE_CONFIG = Path.home() / ".claude.json"
+_FAMILY_RE = re.compile(r"claude-(opus|sonnet|haiku)")
 
 
 def _claude_config_has_1m_variant(model: str) -> bool:
-    """Check ~/.claude.json for a `{model}[1m]` usage/cost entry.
+    """检测机器是否启用了 1M context 模式（通过 ~/.claude.json 的历史用量条目）。
 
-    CC strips the `[1m]` suffix from transcript `model` fields, so the transcript
-    alone can't tell us whether a session runs in 1M mode. But ~/.claude.json
-    persists per-model usage keyed by the full ID including `[1m]`, so its
-    presence is strong evidence the machine uses the 1M variant for this model.
+    两层检测：
+    1. **精确匹配**：`{model}[1m]` 存在（最可靠）
+    2. **同 family 兜底**：任意 `claude-{family}-*[1m]` 存在 → 认为该 family 用 1M
+       （opus/sonnet/haiku 三个 family 各自独立判断）
+
+    Why family fallback: CC transcript 剥离 `[1m]` 后缀，且新 model 变体的 [1m]
+    用量条目可能尚未写入 config（model 升级后第一次跑时）。若用户在同 family
+    下有 1M 历史，则**新 model 大概率仍在 1M 模式**。这是合理启发式。
     """
     if not model:
         return False
     try:
         if not _CLAUDE_CONFIG.is_file():
             return False
-        marker = f'{model}[1m]'.encode("utf-8")
-        with open(_CLAUDE_CONFIG, "rb") as f:
-            return marker in f.read()
+        content = _CLAUDE_CONFIG.read_bytes()
     except OSError:
         return False
 
+    # Level 1: 精确匹配
+    exact_marker = f'{model}[1m]'.encode("utf-8")
+    if exact_marker in content:
+        return True
+
+    # Level 2: 同 family 兜底
+    family_match = _FAMILY_RE.search(model.lower())
+    if not family_match:
+        return False
+    family = family_match.group(1)
+    family_pattern = re.compile(
+        rf'"claude-{family}-[a-z0-9-]+\[1m\]"'.encode("utf-8")
+    )
+    return bool(family_pattern.search(content))
+
 
 def _compute_used_pct(total_tokens: int, model: str) -> tuple[float, int]:
-    """Compute used percentage and detect context window size.
+    """计算使用率 + 检测 context window 大小。
 
-    Strategy:
-    1. If model string explicitly mentions 1m -> use 1M
-    2. If ~/.claude.json records a `{model}[1m]` usage entry -> use 1M
-       (transcript strips the suffix; config file preserves it)
-    3. If total_tokens > 200K -> must be 1M (can't fit in 200K window)
-    4. Otherwise default to 200K
+    优先级（高到低）：
+    1. **ENV var `CLAUDE_CONTEXT_SIZE`** — 用户终极覆盖（任意正整数 token 数）
+    2. **model 字串含 `1m` / `1000000`** → 1M
+    3. **~/.claude.json 有 `{model}[1m]` 或 同 family `*[1m]`** → 1M
+    4. **total_tokens > 200K** → 必然 1M（200K 装不下）
+    5. **默认** → 200K
     """
+    # 1. ENV var 终极覆盖
+    env_size = os.environ.get("CLAUDE_CONTEXT_SIZE", "").strip()
+    if env_size.isdigit() and int(env_size) > 0:
+        ctx_size = int(env_size)
+        pct = round((total_tokens / ctx_size) * 100, 1)
+        return pct, ctx_size
+
     ctx_size = DEFAULT_CONTEXT_SIZE
     if model:
         ml = model.lower()

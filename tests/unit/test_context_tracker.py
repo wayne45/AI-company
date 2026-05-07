@@ -5,7 +5,23 @@ import tempfile
 from io import StringIO
 from pathlib import Path
 
+import pytest
+
 from aiteam.hooks import context_tracker
+
+
+@pytest.fixture(autouse=True)
+def _isolate_environment(monkeypatch, tmp_path):
+    """隔离 ~/.claude.json 与 CLAUDE_CONTEXT_SIZE，防止用户真实环境污染测试。
+
+    所有测试默认认为：
+    - ~/.claude.json 不存在（无 1M 历史）
+    - CLAUDE_CONTEXT_SIZE 未设置
+    单个测试如需启用 1M 场景或 ENV 覆盖，自行在测试体内 monkeypatch。
+    """
+    fake_config = tmp_path / "fake-claude.json"  # 不创建即不存在
+    monkeypatch.setattr(context_tracker, "_CLAUDE_CONFIG", fake_config)
+    monkeypatch.delenv("CLAUDE_CONTEXT_SIZE", raising=False)
 
 
 def _make_transcript(lines: list[dict]) -> Path:
@@ -141,3 +157,54 @@ class TestContextTracker:
             context_tracker.main()  # Should not raise
         finally:
             sys.stdin = old_stdin
+
+    def test_family_level_1m_detection(self, monkeypatch, tmp_path):
+        """同 family 历史触发 1M 检测：claude-opus-4-7 + config 含 claude-opus-4-6[1m] → 1M."""
+        fake_config = tmp_path / "claude.json"
+        fake_config.write_text('{"models": {"claude-opus-4-6[1m]": {"input_tokens": 1000}}}')
+        monkeypatch.setattr(context_tracker, "_CLAUDE_CONFIG", fake_config)
+        # 198K tokens + opus-4-7（无 [1m] 历史） → family fallback 命中 → 1M → 19.8% → 无警告
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {
+                "input_tokens": 1, "cache_read_input_tokens": 196_877, "cache_creation_input_tokens": 1670,
+            }, "model": "claude-opus-4-7"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert out.strip() == "", f"family-level 1M 未命中，误触警告：{out}"
+        transcript.unlink()
+
+    def test_no_cross_family_leak(self, monkeypatch, tmp_path):
+        """跨 family 不泄漏：config 只有 opus[1m]，sonnet 仍按 200K 算."""
+        fake_config = tmp_path / "claude.json"
+        fake_config.write_text('{"models": {"claude-opus-4-6[1m]": {"x": 1}}}')
+        monkeypatch.setattr(context_tracker, "_CLAUDE_CONFIG", fake_config)
+        # 180K + sonnet → 200K → 90% CRITICAL（不被 opus 1M 历史误触为 1M）
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-sonnet-4-6"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert "CONTEXT CRITICAL" in out
+        assert "200000" in out
+        transcript.unlink()
+
+    def test_env_var_override(self, monkeypatch):
+        """CLAUDE_CONTEXT_SIZE ENV var 覆盖一切：500K → 198K=39.6% 无警告."""
+        monkeypatch.setenv("CLAUDE_CONTEXT_SIZE", "500000")
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 198_000}, "model": "claude-opus-4-6"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        assert out.strip() == "", f"ENV 覆盖未生效：{out}"
+        transcript.unlink()
+
+    def test_env_var_priority_beats_1m_marker(self, monkeypatch):
+        """ENV 优先级最高：即便 model 含 1m 后缀，ENV=200K 强制按 200K 算."""
+        monkeypatch.setenv("CLAUDE_CONTEXT_SIZE", "200000")
+        transcript = _make_transcript([
+            {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-opus-4-6[1m]"}},
+        ])
+        out, _ = _run_hook({"transcript_path": str(transcript)})
+        # ENV=200K + 180K → 90% CRITICAL（即便 model 写了 1m 后缀也被覆盖）
+        assert "CONTEXT CRITICAL" in out
+        assert "200000" in out
+        transcript.unlink()
