@@ -7,8 +7,8 @@ This file is managed by the tech-lead; other engineers only read-reference it.
 from __future__ import annotations
 
 import enum
-from datetime import datetime
-from typing import Annotated, Any
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
@@ -461,6 +461,28 @@ class Report(BaseModel):
     task_id: str = ""
     team_id: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class PipelineState(BaseModel):
+    """Task 上的 pipeline 运行时状态。存于 task.config['pipeline']。"""
+
+    template: str | None = None
+    current_stage: str | None = None
+    current_stage_class: str | None = None
+    autopilot_active: bool = False
+    stage_started_at: datetime | None = None
+
+
+class StageTransition(BaseModel):
+    """Pipeline stage 转换事件。存独立表 pipeline_stage_history（append-only）。"""
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    task_id: str
+    from_stage: str | None = None
+    to_stage: str
+    transitioned_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    triggered_by: Literal["manual", "auto", "force", "system"] = "manual"
+    reason: str = ""
 
 
 class ChannelMessage(BaseModel):

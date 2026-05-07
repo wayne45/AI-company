@@ -6,7 +6,7 @@ for SQLite data persistence.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text
@@ -30,9 +30,11 @@ from aiteam.types import (
     OrchestrationMode,
     Phase,
     PhaseStatus,
+    PipelineState,
     Project,
     Report,
     ScheduledTask,
+    StageTransition,
     Task,
     TaskHorizon,
     TaskPriority,
@@ -846,4 +848,45 @@ class ReportModel(Base):
             task_id=report.task_id,
             team_id=report.team_id,
             created_at=report.created_at,
+        )
+
+
+class PipelineStageHistoryModel(Base):
+    """Append-only stage transition log. Agent 不应有 UPDATE/DELETE 权限。"""
+
+    __tablename__ = "pipeline_stage_history"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    from_stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    to_stage: Mapped[str] = mapped_column(String, nullable=False)
+    transitioned_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    triggered_by: Mapped[str] = mapped_column(String, default="manual")
+    reason: Mapped[str] = mapped_column(Text, default="")
+
+    def to_pydantic(self) -> StageTransition:
+        """Convert to Pydantic model."""
+        return StageTransition(
+            id=self.id,
+            task_id=self.task_id,
+            from_stage=self.from_stage,
+            to_stage=self.to_stage,
+            transitioned_at=self.transitioned_at,
+            triggered_by=self.triggered_by,  # type: ignore[arg-type]
+            reason=self.reason or "",
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: StageTransition) -> "PipelineStageHistoryModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            task_id=p.task_id,
+            from_stage=p.from_stage,
+            to_stage=p.to_stage,
+            transitioned_at=p.transitioned_at,
+            triggered_by=p.triggered_by,
+            reason=p.reason,
         )
