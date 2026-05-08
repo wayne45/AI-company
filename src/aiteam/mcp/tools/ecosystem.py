@@ -1130,3 +1130,422 @@ def register(mcp: Any) -> None:
                 report_type="ecosystem-health",
             )
         return result
+
+    # ==========================================================
+    # v1.5.0-B Stage 0 shallow-scan queue
+    # ==========================================================
+
+    @mcp.tool()
+    def ecosystem_apply_shallow_summary(
+        repo_id: str,
+        shallow_summary: str = "",
+        deep_review_id: str = "",
+        error_kind: str = "",
+        error_message: str = "",
+        http_status: int = 0,
+        rate_limit_remaining: int = -1,
+    ) -> dict[str, Any]:
+        """Stage 0 worker callback: write back a shallow summary OR report a failure.
+
+        Success path (default): pass shallow_summary (200-400 char Chinese
+        markdown) and deep_review_id; the OS will persist the summary,
+        advance ``stage_status -> shallow_done``, and mark the deep_review
+        row as completed.
+
+        Failure path: leave shallow_summary empty and pass error_kind,
+        which routes the failure through the §3.1 classifier so the OS
+        can decide whether to immediate-retry, mark deleted/private, or
+        feed the self-learning loop. Valid error_kind values:
+        ``http`` / ``agent_read`` / ``agent_timeout`` / ``json_parse`` /
+        ``fetch_style``.
+
+        Args:
+            repo_id: EcosystemRepoProfile.id.
+            shallow_summary: 200-400 字中文 markdown 总结 (success path).
+            deep_review_id: associated deep_review row id (Stage 0 dispatch).
+            error_kind: failure category hint (failure path only).
+            error_message: short message stored in profile.last_fetch_error.
+            http_status: HTTP status code when error_kind='http'.
+            rate_limit_remaining: when http_status=403, ``0`` indicates rate-limit.
+
+        Returns:
+            On success: ``{success: True, repo_id, shallow_summary_length,
+            stage_status}``. On failure path: ``{success: False, failure_class,
+            immediate_retry, retry_delay_seconds, marked_deleted, marked_private}``.
+        """
+        payload: dict[str, Any] = {
+            "repo_id": repo_id,
+            "shallow_summary": shallow_summary,
+        }
+        if deep_review_id:
+            payload["deep_review_id"] = deep_review_id
+        if error_kind:
+            payload["error_kind"] = error_kind
+        if error_message:
+            payload["error_message"] = error_message
+        if http_status:
+            payload["http_status"] = http_status
+        if rate_limit_remaining >= 0:
+            payload["rate_limit_remaining"] = rate_limit_remaining
+
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/shallow_queue/apply_summary",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "shallow_queue api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_shallow_queue_status() -> dict[str, Any]:
+        """Show Stage 0 shallow-scan queue status for the active project.
+
+        Returns counts for active profiles, pending shallow scans,
+        in-flight dispatches, terminal failures (shallow_failed), and
+        deleted/private-flagged repos. The ``self_learning_pending`` map
+        shows how many distinct repos have hit each failure class so far
+        (a class fires a ``pattern_record`` entry once the count reaches 3).
+
+        Returns:
+            ``{project_id, active_total, pending_shallow, in_flight,
+              shallow_failed, deleted, private_now, concurrency,
+              self_learning_pending}``.
+        """
+        result = _api_call(
+            "GET",
+            "/api/ecosystem/shallow_queue/status",
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "shallow_queue api unavailable"}
+        return result
+
+    # ==========================================================
+    # v1.5.0-C — Stage 1/2/3 lifecycle trigger tools
+    # ==========================================================
+
+    @mcp.tool()
+    def ecosystem_deep_review_request_batch(
+        tags: list[str] | None = None,
+        min_stars: int = 0,
+        limit: int = 20,
+        research_goal: str = "",
+    ) -> dict[str, Any]:
+        """Stage 1 — Queue architecture-analysis dispatches for tag-filtered candidates.
+
+        Pulls active+shallow_done profiles whose tag set covers ``tags`` (AND
+        semantics), creates an ``EcosystemDeepReview`` row per candidate, and
+        returns a list of ``DispatchIntent`` payloads for backend-architect
+        sub-agents. Leader is responsible for actually spawning each agent
+        via the Agent tool with team_name='ecosystem-platform'. Each agent
+        eventually calls ``ecosystem_apply_architecture_md`` to write back.
+
+        Args:
+            tags: Required AND-filter tags (e.g. ['memory_system', 'python']).
+                Empty list returns 400.
+            min_stars: Override min_stars threshold; 0 = use project settings.
+            limit: Max candidates to dispatch per call (default 20).
+            research_goal: Free-form research-goal text injected into each
+                sub-agent prompt (e.g. "升级系统记忆功能").
+
+        Returns:
+            ``{success, dispatched, intents: [{repo_id, repo_full_name,
+              deep_review_id, prompt, timeout_seconds, project_id}, ...]}``
+        """
+        payload: dict[str, Any] = {
+            "tags": tags or [],
+            "limit": limit,
+            "research_goal": research_goal,
+        }
+        if min_stars > 0:
+            payload["min_stars"] = min_stars
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/request_batch",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_apply_architecture_md(
+        deep_review_id: str,
+        architecture_md: str = "",
+        agent_id: str = "",
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        """Stage 1 writeback — submit architecture_md OR report failure.
+
+        Success path (default): pass non-empty architecture_md (800-1500 字
+        Chinese markdown). The OS persists it, advances ``stage_status ->
+        architecture_done``, and marks the deep_review row completed.
+
+        Failure path: leave architecture_md empty and pass error_message;
+        the OS advances ``stage_status -> architecture_failed`` so manual
+        retry surfaces in the UI.
+
+        Args:
+            deep_review_id: Target deep_review row id.
+            architecture_md: 800-1500 字 Chinese markdown (success path).
+            agent_id: Optional agent identifier recorded on the review row.
+            error_message: Short message stored on review.risks_md (failure path).
+
+        Returns:
+            On success: ``{success: True, deep_review_id, stage_status,
+            architecture_md_length}``. On failure: ``{success: False,
+            stage_status='architecture_failed', error}``.
+        """
+        payload: dict[str, Any] = {
+            "deep_review_id": deep_review_id,
+            "architecture_md": architecture_md,
+        }
+        if agent_id:
+            payload["agent_id"] = agent_id
+        if error_message:
+            payload["error_message"] = error_message
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/apply_architecture_md",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_trigger_debate(
+        repo_ids: list[str] | None = None,
+        research_goal: str = "",
+        suggested_advocate: str = "backend-architect",
+        suggested_critic: str = "code-reviewer",
+        suggested_judge: str = "team-lead",
+    ) -> dict[str, Any]:
+        """Stage 2 — Build debate dispatch payload (Leader still calls debate_start).
+
+        Validates that each ``repo_id`` has at least one
+        ``architecture_done`` review, then returns a payload (suggested
+        topic + roles + linked review_ids) so the caller can invoke the
+        existing ``debate_start`` MCP tool. After ``debate_start`` returns
+        a meeting id, call ``ecosystem_link_debate_meeting`` to write
+        ``debate_meeting_id`` back onto each review row.
+
+        Args:
+            repo_ids: 1-5 finalist repo ids selected from the Stage 1 batch.
+            research_goal: Drives the suggested meeting topic.
+            suggested_advocate / critic / judge: Default debate roles. Caller
+                may override when calling debate_start.
+
+        Returns:
+            ``{success, review_ids, repo_full_names, suggested_topic,
+              suggested_advocate, suggested_critic, suggested_judge,
+              project_id, next_action}``
+        """
+        payload = {
+            "repo_ids": repo_ids or [],
+            "research_goal": research_goal,
+            "suggested_advocate": suggested_advocate,
+            "suggested_critic": suggested_critic,
+            "suggested_judge": suggested_judge,
+        }
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/trigger_debate",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_link_debate_meeting(
+        review_ids: list[str],
+        meeting_id: str,
+    ) -> dict[str, Any]:
+        """Stage 2 helper — link ``debate_start`` meeting id back to review rows.
+
+        Called immediately after ``debate_start`` succeeds. Writes
+        ``debate_meeting_id`` onto every review in ``review_ids`` so the
+        meeting-conclude hook (``meeting_ecosystem_writeback.py``) can
+        match concluded meetings to their ecosystem reviews.
+
+        Args:
+            review_ids: List of deep_review ids returned by
+                ``ecosystem_trigger_debate``.
+            meeting_id: Meeting id returned by ``debate_start``.
+
+        Returns:
+            ``{success, linked, meeting_id}``.
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/link_debate_meeting",
+            {"review_ids": review_ids, "meeting_id": meeting_id},
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_apply_debate_result(
+        deep_review_id: str,
+        risks_md: str = "",
+        learnings_md: str = "",
+        integration_md: str = "",
+        integration_recommendation: str = "",
+        agent_id: str = "",
+    ) -> dict[str, Any]:
+        """Stage 2 writeback — submit debate conclusion to advance to ``debated``.
+
+        At least one of risks_md / learnings_md / integration_md must be
+        non-empty. ``integration_recommendation`` is a short enum:
+        ``integrate`` / ``reference`` / ``learn`` / ``skip``.
+
+        Args:
+            deep_review_id: Target deep_review row id.
+            risks_md: 风险点 markdown.
+            learnings_md: 借鉴点 markdown.
+            integration_md: 集成建议 markdown.
+            integration_recommendation: integrate/reference/learn/skip enum.
+            agent_id: Optional agent identifier recorded on the review.
+
+        Returns:
+            ``{success, deep_review_id, stage_status, debated_at}``.
+        """
+        payload: dict[str, Any] = {"deep_review_id": deep_review_id}
+        if risks_md:
+            payload["risks_md"] = risks_md
+        if learnings_md:
+            payload["learnings_md"] = learnings_md
+        if integration_md:
+            payload["integration_md"] = integration_md
+        if integration_recommendation:
+            payload["integration_recommendation"] = integration_recommendation
+        if agent_id:
+            payload["agent_id"] = agent_id
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/apply_debate_result",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_mark_as_reference(
+        deep_review_id: str,
+        agent_id: str = "",
+        confidence: float = 1.0,
+    ) -> dict[str, Any]:
+        """Stage 3 reference path — add ``lifecycle:reference`` tag + advance to ``referenced``.
+
+        Use when the debate concludes that the repo is worth keeping as an
+        architectural reference but not integrated. The repo will appear
+        highlighted in future searches as "已研究过" so the team avoids
+        re-deep-scanning it.
+
+        Args:
+            deep_review_id: Target deep_review row id.
+            agent_id: Optional agent identifier recorded on the tag.
+            confidence: 0.0-1.0; default 1.0 (manual decision).
+
+        Returns:
+            ``{success, deep_review_id, stage_status, stage3_completed_at}``.
+        """
+        payload: dict[str, Any] = {
+            "deep_review_id": deep_review_id,
+            "confidence": confidence,
+        }
+        if agent_id:
+            payload["agent_id"] = agent_id
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/mark_as_reference",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_start_integration(
+        deep_review_id: str,
+        title: str = "",
+        description: str = "",
+        priority: str = "high",
+        horizon: str = "mid",
+        extra_tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Stage 3 integrate path — build a task_create payload + tag the repo.
+
+        Adds ``lifecycle:integrated`` tag, advances ``stage_status``, and
+        returns a task payload (title / description / priority / horizon /
+        tags) ready to POST to ``/api/projects/{project_id}/tasks``.
+        After the task is created, call ``ecosystem_link_integration_task``
+        to write ``integration_task_id`` back onto the review.
+
+        ecosystem 不接管实施 — task ownership 由现有任务/团队系统接管。
+
+        Args:
+            deep_review_id: Target deep_review row id (must be debated /
+                architecture_done / referenced).
+            title: Optional task title (auto-generated if empty).
+            description: Optional task description (auto-generated if empty).
+            priority: Task priority — critical / high (default) / medium / low.
+            horizon: Task horizon — short / mid (default) / long.
+            extra_tags: Additional tags appended to the task.
+
+        Returns:
+            ``{success, review_id, repo_id, repo_full_name, task_payload,
+              project_id, next_action}``.
+        """
+        payload: dict[str, Any] = {
+            "deep_review_id": deep_review_id,
+            "title": title,
+            "description": description,
+            "priority": priority,
+            "horizon": horizon,
+            "extra_tags": extra_tags or [],
+        }
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/start_integration",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_link_integration_task(
+        deep_review_id: str,
+        task_id: str,
+    ) -> dict[str, Any]:
+        """Stage 3 helper — link integration task id back to review row.
+
+        Args:
+            deep_review_id: Target deep_review row id.
+            task_id: Task id returned by ``/api/projects/{project_id}/tasks``.
+
+        Returns:
+            ``{success, deep_review_id, integration_task_id, stage_status}``.
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/lifecycle/link_integration_task",
+            {"deep_review_id": deep_review_id, "task_id": task_id},
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "lifecycle api unavailable"}
+        return result

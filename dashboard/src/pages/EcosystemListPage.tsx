@@ -1,6 +1,9 @@
 import { useState, useMemo } from 'react';
-import { AlertCircle, Boxes } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { AlertCircle, Boxes, Search as SearchIcon } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Button } from '@/components/ui/button';
 import { useEcosystemProfiles } from '@/api/ecosystem';
 import type { EcosystemFilters } from '@/api/ecosystem';
 import { RepoCard } from '@/components/ecosystem/RepoCard';
@@ -8,27 +11,32 @@ import { FilterBar } from '@/components/ecosystem/FilterBar';
 import { EcosystemStatsBar } from '@/components/ecosystem/EcosystemStatsBar';
 import { useProject } from '@/context/ProjectContext';
 
+type LifecycleTab = 'active' | 'all' | 'deleted';
+
 /**
- * Ecosystem 列表页 — 浏览所有已扫的生态仓档案。
+ * Ecosystem 列表页 — v1.5.0-E：stage 徽章 + 活跃/全量/已删除 tab。
  * 路径：/ecosystem
- * 数据源：GET /api/ecosystem/profiles?facet_counts=true
- *
- * UX 增强：
- *   - 顶部 StatsBar：项目 chip + 总数 / 已深扫 / 待深扫 / 失活 / Top 3 类别
- *   - 后端按 X-Project-Id header 自动隔离，切换项目后 React Query invalidate 触发刷新
+ * 数据源：GET /api/ecosystem/profiles?facet_counts=true&is_active=...&is_deleted=...
  */
 export function EcosystemListPage() {
   const { projectId, projectName } = useProject();
+  const [tab, setTab] = useState<LifecycleTab>('active');
   const [filters, setFilters] = useState<EcosystemFilters>({
     limit: 200,
     facetCounts: true,
   });
 
-  const { data, isLoading, error } = useEcosystemProfiles(filters);
+  // 根据 tab 注入活跃/已删除参数
+  const effectiveFilters = useMemo<EcosystemFilters>(() => {
+    if (tab === 'active') return { ...filters, isActive: true, isDeleted: false };
+    if (tab === 'deleted') return { ...filters, isDeleted: true };
+    return { ...filters }; // all: 不限定 active/deleted
+  }, [filters, tab]);
+
+  const { data, isLoading, error } = useEcosystemProfiles(effectiveFilters);
   const profiles = data?.profiles ?? [];
 
   // 客户端二次过滤：keyword 也匹配 owner/description
-  // 后端的 keyword 已经匹配 name，这里补充对 description 的本地兜底过滤
   const filtered = useMemo(() => {
     if (!filters.keyword) return profiles;
     const q = filters.keyword.toLowerCase();
@@ -46,18 +54,51 @@ export function EcosystemListPage() {
     <div className="flex h-full flex-col">
       {/* 页头 */}
       <div className="border-b px-6 py-4 bg-background">
-        <div className="flex items-center gap-2">
-          <Boxes className="h-5 w-5 text-primary" aria-hidden="true" />
-          <h1 className="text-xl font-semibold">生态仓档案</h1>
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <Boxes className="h-5 w-5 text-primary" aria-hidden="true" />
+              <h1 className="text-xl font-semibold">生态仓档案</h1>
+            </div>
+            <p className="text-sm text-muted-foreground mt-1">
+              Claude Agent / MCP / Memory / Skill 等开源仓的广索引视图。点击卡片进入详情。
+              {projectName && (
+                <>
+                  {' '}当前已按项目 <span className="text-primary font-medium">{projectName}</span> 过滤。
+                </>
+              )}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            nativeButton={false}
+            render={<Link to="/ecosystem/research" />}
+          >
+            <SearchIcon className="mr-1 h-4 w-4" aria-hidden="true" />
+            查找候选
+          </Button>
         </div>
-        <p className="text-sm text-muted-foreground mt-1">
-          Claude Agent / MCP / Memory / Skill 等开源仓的广索引视图。点击卡片进入详情。
-          {projectName && (
-            <>
-              {' '}当前已按项目 <span className="text-primary font-medium">{projectName}</span> 过滤。
-            </>
-          )}
-        </p>
+
+        {/* 活跃/全量/已删除 tab */}
+        <Tabs
+          value={tab}
+          onValueChange={(v: string) => setTab(v as LifecycleTab)}
+          className="mt-3"
+        >
+          <TabsList variant="line" className="gap-2">
+            <TabsTrigger value="active" aria-label="活跃集">
+              活跃集
+            </TabsTrigger>
+            <TabsTrigger value="all" aria-label="全量">
+              全量
+            </TabsTrigger>
+            <TabsTrigger value="deleted" aria-label="已删除">
+              已删除
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       </div>
 
       {/* 统计条 */}
@@ -114,9 +155,13 @@ export function EcosystemListPage() {
             <p className="text-xs mt-1">
               {filters.keyword || filters.category || filters.minStars
                 ? '调整筛选条件或清除过滤试试'
-                : projectId
-                  ? '当前项目下尚无生态仓档案，可切换到「全部项目」或运行扫描任务后填充'
-                  : '运行扫描任务后将填充档案'}
+                : tab === 'deleted'
+                  ? '本项目尚未识别到已删除/被设私有的仓'
+                  : tab === 'active'
+                    ? '当前活跃集为空，可切换到「全量」查看所有归档仓'
+                    : projectId
+                      ? '当前项目下尚无生态仓档案，可切换到「全部项目」或运行扫描任务后填充'
+                      : '运行扫描任务后将填充档案'}
             </p>
           </div>
         )}

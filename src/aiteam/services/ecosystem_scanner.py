@@ -210,6 +210,11 @@ class EcosystemScanner:
         config: FilterConfig (defaults to FilterConfig.from_env()).
         project_id: 可选项目作用域；非空时所有写入会附带此 project_id，
             读取也限定于同项目。空字符串表示透传 repo 的 _project_scope。
+        on_new_profile: Optional async hook invoked once per **newly-archived**
+            profile (i.e. ``existing is None`` at upsert time). Wired to the
+            v1.5.0-B Stage 0 ``EcosystemShallowQueueWorker.enqueue_repo`` so
+            new repos get an immediate shallow-scan dispatch. Failures are
+            logged but never abort the scan.
     """
 
     def __init__(
@@ -218,11 +223,15 @@ class EcosystemScanner:
         gh_search: GhSearchFunc,
         config: FilterConfig | None = None,
         project_id: str = "",
+        on_new_profile: (
+            Callable[[EcosystemRepoProfile], Awaitable[Any]] | None
+        ) = None,
     ) -> None:
         self._repo = repo
         self._gh_search = gh_search
         self._config = config or FilterConfig.from_env()
         self._project_id = project_id or repo._project_scope or ""
+        self._on_new_profile = on_new_profile
 
     @property
     def config(self) -> FilterConfig:
@@ -309,6 +318,20 @@ class EcosystemScanner:
                 )
                 if existing is None:
                     new_count += 1
+                    # v1.5.0-B: notify Stage 0 queue worker so the new
+                    # repo gets an immediate shallow-scan dispatch. Look
+                    # up the persisted row to obtain the assigned id.
+                    if self._on_new_profile is not None:
+                        try:
+                            persisted = await self._repo.get_ecosystem_profile(
+                                fn, project_id=self._project_id or None
+                            )
+                            if persisted is not None:
+                                await self._on_new_profile(persisted)
+                        except Exception as hook_exc:
+                            errors.append(
+                                f"on_new_profile {fn}: {hook_exc!s}"
+                            )
                 else:
                     updated_count += 1
             except Exception as exc:

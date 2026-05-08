@@ -525,6 +525,15 @@ class EcosystemRepoProfile(BaseModel):
     is_archived: bool = False  # > 365 天未 push 标记为 deprecated
     scan_run_id: str | None = None  # 关联到扫描批次 EcosystemScanRun.id
     description_excerpt: str = ""  # 描述摘要，用于二次相关性过滤
+    # v1.5.0-A 扩展：渐进式漏斗 Stage 0 浅扫 + 失败追踪 + 活跃集
+    shallow_summary: str = ""  # Stage 0 agent 浅扫总结（200-400 字，区分 description_excerpt）
+    last_shallow_refreshed_at: datetime | None = None  # 上次浅扫刷新时间
+    is_deleted: bool = False  # GitHub 端仓被删（API 404）
+    is_private_now: bool = False  # GitHub 端仓被设私密（API 403 forbidden, not rate limit）
+    last_fetch_error: str = ""  # 最近一次抓取错误的短消息
+    fetch_failure_count: int = 0  # 累计失败次数
+    is_active: bool = True  # 是否在当前项目活跃集（top_n by stars，动态计算 + 缓存）
+    active_rank: int | None = None  # 当前项目内排名（按 stars，None=不在 top_n）
 
 
 # ============================================================
@@ -568,12 +577,36 @@ class EcosystemTagCategory(enum.StrEnum):
 
 
 class EcosystemTagSource(enum.StrEnum):
-    """标签来源。"""
+    """标签来源。
+
+    v1.5.0-A 新增 LIFECYCLE — 用于漏斗 Stage 3 标记 reference / integrated /
+    deleted / private_now / evaluating，由 ecosystem lifecycle 自动写入。
+    """
 
     GITHUB_TOPIC = "github_topic"
     AUTO_RULE = "auto_rule"
     AUTO_LLM = "auto_llm"
     MANUAL = "manual"
+    LIFECYCLE = "lifecycle"
+
+
+class EcosystemStageStatus(enum.StrEnum):
+    """生态仓深扫漏斗 stage 状态 (v1.5.0)。
+
+    渐进式累加：queued → shallow_done → architecture_done → debated →
+    referenced / integrated。每个 *_failed 子状态表示该阶段重试 5 次仍失败，
+    不影响其他 stage 推进。
+    """
+
+    QUEUED = "queued"
+    SHALLOW_DONE = "shallow_done"
+    SHALLOW_FAILED = "shallow_failed"
+    ARCHITECTURE_DONE = "architecture_done"
+    ARCHITECTURE_FAILED = "architecture_failed"
+    DEBATED = "debated"
+    DEBATED_FAILED = "debated_failed"
+    REFERENCED = "referenced"
+    INTEGRATED = "integrated"
 
 
 class EcosystemRelationType(enum.StrEnum):
@@ -620,6 +653,15 @@ class EcosystemDeepReview(BaseModel):
     completed_at: datetime | None = None
     duration_seconds: float = 0.0
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    # v1.5.0-A 扩展：渐进式漏斗 stage 状态机 + 关联会议/集成任务
+    stage_status: EcosystemStageStatus = EcosystemStageStatus.QUEUED  # 漏斗 stage 状态
+    integration_md: str = ""  # Stage 2 详细集成建议（不只是 enum）
+    shallow_completed_at: datetime | None = None  # Stage 0 完成时间
+    architecture_completed_at: datetime | None = None  # Stage 1 完成时间
+    debated_at: datetime | None = None  # Stage 2 辩论结束时间
+    stage3_completed_at: datetime | None = None  # Stage 3 referenced/integrated 完成时间
+    debate_meeting_id: str | None = None  # FK -> Meeting.id (Stage 2 触发会议)
+    integration_task_id: str | None = None  # FK -> Task.id (Stage 3 integrate 派任务)
 
 
 class EcosystemTag(BaseModel):
@@ -688,6 +730,46 @@ class EcosystemScanRun(BaseModel):
     notes: str = ""
     triggered_by: str = "manual"  # "manual" / "cron"
     agent_id: str | None = None
+
+
+class EcosystemRepoStatusSnapshot(BaseModel):
+    """每次 scan 的仓状态快照 (v1.5.0-A 决策 D — append-only 永不清理)。
+
+    用于追踪 stars 涨跌、push 频率、激活/退出活跃集等历史变化。
+    每次 scan 跑完为活跃集中每个仓写一行；用户可通过 UI 看历史 timeline。
+    """
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str | None = None
+    repo_id: str  # FK -> EcosystemRepoProfile.id
+    scan_run_id: str  # FK -> EcosystemScanRun.id (触发的扫描批次)
+    snapshot_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    stars: int = 0
+    pushed_at: datetime | None = None
+    is_archived: bool = False  # GitHub archived 状态
+    is_active: bool = True  # 当时是否在项目活跃集
+    summary_at_time: str = ""  # 当时的 shallow_summary (供历史比对)
+
+
+class EcosystemProjectSettings(BaseModel):
+    """每个项目的 ecosystem 配置 (v1.5.0-A 决策 C — 项目自定义阈值)。
+
+    项目首次访问 ecosystem 时由系统自动创建默认行；
+    AI Team OS 项目使用更严格的默认值 (min_stars=5000, top_n=200)。
+    """
+
+    project_id: str  # 主键 — 一项目一行
+    min_stars: int = 1000  # 入档阈值
+    top_n: int = 200  # 活跃集大小（按 stars 排序前 N）
+    refresh_interval_days: int = 7  # 浅扫刷新间隔
+    auto_shallow_on_archive: bool = True  # 入档时是否自动跑 Stage 0
+    focus_topics: list[str] = Field(default_factory=list)  # 关注 topic 白名单（空=全 topic）
+    focus_languages: list[str] = Field(default_factory=list)  # 关注语言白名单（空=全语言）
+    # 决策 F：测试驱动调整的并发配置
+    shallow_concurrency: int = 5
+    deep_concurrency: int = 3
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
 # ============================================================

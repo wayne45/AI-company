@@ -227,11 +227,20 @@ _DEFAULT_ECOSYSTEM_TAGS: list[tuple[str, str, str]] = [
     ("plugin", "positioning", "插件 / 扩展"),
     ("template", "positioning", "项目模板"),
     ("docs_only", "positioning", "纯文档 / 教程 / awesome-list / cookbook"),
+    # v1.5.0-A: lifecycle (positioning) — 漏斗 Stage 3 + 失败状态自动打
+    ("evaluating", "positioning", "正在评估中（Stage 1-2）"),
+    ("reference", "positioning", "已作为架构借鉴参考"),
+    ("integrated", "positioning", "已集成到本项目"),
+    ("deleted", "positioning", "GitHub 端仓已被删除"),
+    ("private_now", "positioning", "GitHub 端仓已设为私密"),
 ]
 
 
 async def ensure_default_tags(repo: StorageRepository) -> None:
-    """启动时确保默认 21 个 EcosystemTag 存在 (INSERT OR IGNORE 语义)。
+    """启动时确保默认 31 个 EcosystemTag 存在 (INSERT OR IGNORE 语义)。
+
+    v1.5.0-A: 26 → 31 (新增 5 个 lifecycle positioning tags：
+    evaluating / reference / integrated / deleted / private_now)。
 
     使用 upsert_tag 实现幂等：已存在则保留，不会覆盖人工修改的描述。
     实际逻辑通过 get_tag_by_name 检查后才插入，避免覆盖。
@@ -307,6 +316,113 @@ async def _backfill_ecosystem_default_project(repo: StorageRepository) -> None:
                 logger.info("  %s: %d", k, v)
     else:
         logger.info("Ecosystem backfill: no NULL rows to migrate")
+
+
+async def _backfill_v150_progressive_funnel(repo: StorageRepository) -> None:
+    """v1.5.0-A 启动迁移：
+
+    1) 现有 DeepReview.stage_status 推断
+       - 已完成且有 risks_md+learnings_md (说明跑过深扫总结) → DEBATED
+       - 否则有 architecture_md → ARCHITECTURE_DONE
+       - 否则有 summary_md → SHALLOW_DONE
+       - 其他保持 QUEUED
+    2) 现有 Profile.is_active 字段（默认 True 已由 column default 保证）
+    3) 为每个项目创建 EcosystemProjectSettings 默认行
+       - 名称含 "AI Team OS" 的项目用严格默认 (min_stars=5000, top_n=200)
+       - 其他项目用通用默认 (min_stars=1000, top_n=100)
+
+    幂等：每次启动重跑都安全，已有 stage_status / settings 不动。
+    """
+    try:
+        projects = await repo.list_projects()
+    except Exception as exc:
+        logger.warning("v1.5.0 backfill: list_projects failed: %s", exc)
+        return
+
+    # 1) DeepReview stage_status 推断（仅迁移 stage_status='queued' 的历史行）
+    try:
+        deep_reviews = await repo.list_deep_reviews(limit=10000, project_id=None)
+    except Exception as exc:
+        logger.warning("v1.5.0 backfill: list_deep_reviews failed: %s", exc)
+        deep_reviews = []
+
+    promoted_counts = {
+        "shallow_done": 0,
+        "architecture_done": 0,
+        "debated": 0,
+        "kept_queued": 0,
+    }
+    from aiteam.types import EcosystemDeepReviewStatus, EcosystemStageStatus
+
+    for review in deep_reviews:
+        # 仅迁移 stage_status 仍是默认 QUEUED 的行；保护已手工推进的状态
+        if review.stage_status != EcosystemStageStatus.QUEUED:
+            continue
+        # 推断规则（保守，从严到松）
+        if (
+            review.status == EcosystemDeepReviewStatus.COMPLETED
+            and review.risks_md
+            and review.learnings_md
+        ):
+            new_stage = EcosystemStageStatus.DEBATED
+            promoted_counts["debated"] += 1
+        elif review.architecture_md:
+            new_stage = EcosystemStageStatus.ARCHITECTURE_DONE
+            promoted_counts["architecture_done"] += 1
+        elif review.summary_md:
+            new_stage = EcosystemStageStatus.SHALLOW_DONE
+            promoted_counts["shallow_done"] += 1
+        else:
+            promoted_counts["kept_queued"] += 1
+            continue
+        try:
+            await repo.update_deep_review_stage(
+                review.id,
+                new_stage,
+                project_id=review.project_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "v1.5.0 backfill: update_deep_review_stage(%s) failed: %s",
+                review.id[:8],
+                exc,
+            )
+
+    if any(v > 0 for v in promoted_counts.values()):
+        logger.info(
+            "v1.5.0 backfill: deep_review stage_status promoted "
+            "(shallow_done=%d, architecture_done=%d, debated=%d, kept_queued=%d)",
+            promoted_counts["shallow_done"],
+            promoted_counts["architecture_done"],
+            promoted_counts["debated"],
+            promoted_counts["kept_queued"],
+        )
+
+    # 2) 项目 ecosystem_project_settings 默认值
+    settings_created = 0
+    for p in projects:
+        is_ai_team_os = "ai team os" in (p.name or "").lower() or "ai-team-os" in (
+            p.name or ""
+        ).lower()
+        try:
+            existing = await repo.get_ecosystem_project_settings(p.id)
+            if existing is None:
+                await repo.ensure_ecosystem_project_settings(
+                    p.id, is_ai_team_os=is_ai_team_os
+                )
+                settings_created += 1
+        except Exception as exc:
+            logger.warning(
+                "v1.5.0 backfill: ensure_ecosystem_project_settings(%s) failed: %s",
+                p.name,
+                exc,
+            )
+
+    if settings_created > 0:
+        logger.info(
+            "v1.5.0 backfill: created %d EcosystemProjectSettings rows",
+            settings_created,
+        )
 
 
 async def _auto_create_projects(repo: StorageRepository) -> None:
@@ -444,6 +560,9 @@ async def init_dependencies() -> None:
     # Stage J: backfill legacy ecosystem rows to the default project
     # so the existing 188 repos remain visible from "AI Team OS" project.
     await _backfill_ecosystem_default_project(_repository)
+
+    # v1.5.0-A backfill: deep_review stage_status + project ecosystem settings
+    await _backfill_v150_progressive_funnel(_repository)
 
     # Stage J: refresh project_dir → project_id resolution cache
     await refresh_project_dir_cache(_repository)

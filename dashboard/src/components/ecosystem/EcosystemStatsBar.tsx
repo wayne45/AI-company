@@ -3,7 +3,7 @@ import { Boxes, FileSearch, Archive, Tag, FolderOpen, Folder } from 'lucide-reac
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import type { EcosystemRepoProfile, EcosystemFacetCounts } from '@/api/ecosystem';
-import { CATEGORY_LABELS, useEcosystemDeepReviews } from '@/api/ecosystem';
+import { CATEGORY_LABELS } from '@/api/ecosystem';
 import { useProject } from '@/context/ProjectContext';
 
 interface EcosystemStatsBarProps {
@@ -73,10 +73,6 @@ export function EcosystemStatsBar({
 }: EcosystemStatsBarProps) {
   const { projectName } = useProject();
 
-  // 拉真实 completed deep_reviews（按当前 X-Project-Id header 自动按项目隔离）
-  const { data: completedReviews } = useEcosystemDeepReviews('completed');
-  const reviewedCount = completedReviews?.total ?? 0;
-
   const stats = useMemo(() => {
     const totalCount = total ?? allProfiles.length;
     const needsDeepCount = allProfiles.filter((p) => p.needs_deep_review).length;
@@ -90,12 +86,6 @@ export function EcosystemStatsBar({
     }).length;
     return { totalCount, needsDeepCount, archivedCount };
   }, [allProfiles, total]);
-
-  // 覆盖率 = 已深扫 / 总仓数（保留 1 位小数；0 仓时显示占位）
-  const coverageHint =
-    stats.totalCount > 0
-      ? `${((reviewedCount / stats.totalCount) * 100).toFixed(1)}% 覆盖`
-      : '—';
 
   // Top 3 类别（按命中数量降序）
   const topCategories = useMemo(() => {
@@ -138,25 +128,20 @@ export function EcosystemStatsBar({
         )}
       </div>
 
-      {/* 数值卡片排 */}
+      {/* 数值卡片排（研究产物次数显示在 RepoCard stage 徽章，不重复在 stats）*/}
       <div className="flex flex-wrap gap-2">
         <StatCard
           Icon={Boxes}
-          label="总仓数"
+          label="当前视图"
           value={stats.totalCount}
+          hint="切「活跃集」或「全量」tab 改变范围"
           tone="default"
         />
         <StatCard
           Icon={FileSearch}
-          label="已深扫"
-          value={reviewedCount}
-          hint={coverageHint}
-          tone="primary"
-        />
-        <StatCard
-          Icon={FileSearch}
-          label="待深扫"
+          label="待浅扫"
           value={stats.needsDeepCount}
+          hint="尚未派 agent 浅扫总结"
           tone="info"
         />
         <StatCard

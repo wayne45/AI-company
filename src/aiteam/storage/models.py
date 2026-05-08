@@ -32,12 +32,15 @@ from aiteam.types import (
     DemoResult,
     EcosystemDeepReview,
     EcosystemDeepReviewStatus,
+    EcosystemProjectSettings,
     EcosystemRelation,
     EcosystemRelationType,
     EcosystemRepoProfile,
+    EcosystemRepoStatusSnapshot,
     EcosystemRepoTag,
     EcosystemScanRun,
     EcosystemScanStrategy,
+    EcosystemStageStatus,
     EcosystemTag,
     EcosystemTagCategory,
     EcosystemTagSource,
@@ -958,6 +961,19 @@ class EcosystemRepoProfileModel(Base):
             "is_archived",
             "stars",
         ),
+        # v1.5.0-A perf — active set hot path (filter is_active + is_deleted/private)
+        Index(
+            "ix_ecosystem_profiles_project_active_stars",
+            "project_id",
+            "is_active",
+            "stars",
+        ),
+        Index(
+            "ix_ecosystem_profiles_project_deleted_private",
+            "project_id",
+            "is_deleted",
+            "is_private_now",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -988,6 +1004,15 @@ class EcosystemRepoProfileModel(Base):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     scan_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     description_excerpt: Mapped[str] = mapped_column(Text, default="")
+    # v1.5.0-A 扩展字段：浅扫 + 失败追踪 + 活跃集
+    shallow_summary: Mapped[str] = mapped_column(Text, default="")
+    last_shallow_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_private_now: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_fetch_error: Mapped[str] = mapped_column(Text, default="")
+    fetch_failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    active_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     def to_pydantic(self) -> EcosystemRepoProfile:
         """Convert to Pydantic model."""
@@ -1022,6 +1047,14 @@ class EcosystemRepoProfileModel(Base):
             is_archived=bool(self.is_archived) if self.is_archived is not None else False,
             scan_run_id=self.scan_run_id,
             description_excerpt=self.description_excerpt or "",
+            shallow_summary=self.shallow_summary or "",
+            last_shallow_refreshed_at=self.last_shallow_refreshed_at,
+            is_deleted=bool(self.is_deleted) if self.is_deleted is not None else False,
+            is_private_now=bool(self.is_private_now) if self.is_private_now is not None else False,
+            last_fetch_error=self.last_fetch_error or "",
+            fetch_failure_count=self.fetch_failure_count or 0,
+            is_active=bool(self.is_active) if self.is_active is not None else True,
+            active_rank=self.active_rank,
         )
 
     @classmethod
@@ -1051,6 +1084,14 @@ class EcosystemRepoProfileModel(Base):
             is_archived=p.is_archived,
             scan_run_id=p.scan_run_id,
             description_excerpt=p.description_excerpt or "",
+            shallow_summary=p.shallow_summary or "",
+            last_shallow_refreshed_at=p.last_shallow_refreshed_at,
+            is_deleted=p.is_deleted,
+            is_private_now=p.is_private_now,
+            last_fetch_error=p.last_fetch_error or "",
+            fetch_failure_count=p.fetch_failure_count or 0,
+            is_active=p.is_active,
+            active_rank=p.active_rank,
         )
 
 
@@ -1090,6 +1131,15 @@ class EcosystemDeepReviewModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(tz=timezone.utc)
     )
+    # v1.5.0-A 扩展字段：渐进式漏斗 stage + 关联会议/集成任务
+    stage_status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    integration_md: Mapped[str] = mapped_column(Text, default="")
+    shallow_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    architecture_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    debated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    stage3_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    debate_meeting_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    integration_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     def to_pydantic(self) -> EcosystemDeepReview:
         """Convert to Pydantic model."""
@@ -1116,6 +1166,14 @@ class EcosystemDeepReviewModel(Base):
             completed_at=self.completed_at,
             duration_seconds=self.duration_seconds or 0.0,
             created_at=self.created_at,
+            stage_status=EcosystemStageStatus(self.stage_status) if self.stage_status else EcosystemStageStatus.QUEUED,
+            integration_md=self.integration_md or "",
+            shallow_completed_at=self.shallow_completed_at,
+            architecture_completed_at=self.architecture_completed_at,
+            debated_at=self.debated_at,
+            stage3_completed_at=self.stage3_completed_at,
+            debate_meeting_id=self.debate_meeting_id,
+            integration_task_id=self.integration_task_id,
         )
 
     @classmethod
@@ -1142,6 +1200,14 @@ class EcosystemDeepReviewModel(Base):
             completed_at=p.completed_at,
             duration_seconds=p.duration_seconds,
             created_at=p.created_at,
+            stage_status=p.stage_status.value if hasattr(p.stage_status, "value") else str(p.stage_status or "queued"),
+            integration_md=p.integration_md or "",
+            shallow_completed_at=p.shallow_completed_at,
+            architecture_completed_at=p.architecture_completed_at,
+            debated_at=p.debated_at,
+            stage3_completed_at=p.stage3_completed_at,
+            debate_meeting_id=p.debate_meeting_id,
+            integration_task_id=p.integration_task_id,
         )
 
 
@@ -1352,4 +1418,137 @@ class EcosystemScanRunModel(Base):
             notes=p.notes,
             triggered_by=p.triggered_by,
             agent_id=p.agent_id,
+        )
+
+
+# ============================================================
+# v1.5.0-A 新建表：状态快照 + 项目 ecosystem 配置
+# ============================================================
+
+
+class EcosystemRepoStatusSnapshotModel(Base):
+    """每次 scan 的仓状态快照 ORM 模型 (append-only，永不清理)。
+
+    项目隔离：每条快照属于发起 scan 的项目；同一仓在不同项目下有独立快照流。
+    用于历史时间线展示 (stars 涨跌、活跃集进出、archived 切换)。
+    """
+
+    __tablename__ = "ecosystem_repo_status_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_eco_status_snap_repo_time",
+            "repo_id",
+            "snapshot_at",
+        ),
+        Index(
+            "ix_eco_status_snap_scan_run",
+            "scan_run_id",
+        ),
+        Index(
+            "ix_eco_status_snap_project_repo",
+            "project_id",
+            "repo_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    scan_run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    stars: Mapped[int] = mapped_column(Integer, default=0)
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    summary_at_time: Mapped[str] = mapped_column(Text, default="")
+
+    def to_pydantic(self) -> EcosystemRepoStatusSnapshot:
+        """Convert to Pydantic model."""
+        return EcosystemRepoStatusSnapshot(
+            id=self.id,
+            project_id=self.project_id,
+            repo_id=self.repo_id,
+            scan_run_id=self.scan_run_id,
+            snapshot_at=self.snapshot_at,
+            stars=self.stars or 0,
+            pushed_at=self.pushed_at,
+            is_archived=bool(self.is_archived) if self.is_archived is not None else False,
+            is_active=bool(self.is_active) if self.is_active is not None else True,
+            summary_at_time=self.summary_at_time or "",
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemRepoStatusSnapshot) -> "EcosystemRepoStatusSnapshotModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            id=p.id,
+            project_id=p.project_id,
+            repo_id=p.repo_id,
+            scan_run_id=p.scan_run_id,
+            snapshot_at=p.snapshot_at,
+            stars=p.stars,
+            pushed_at=p.pushed_at,
+            is_archived=p.is_archived,
+            is_active=p.is_active,
+            summary_at_time=p.summary_at_time or "",
+        )
+
+
+class EcosystemProjectSettingsModel(Base):
+    """每个项目的 ecosystem 配置 ORM 模型。
+
+    project_id 主键 = 一项目一行。包含活跃集阈值、刷新间隔、关注白名单、并发参数。
+    """
+
+    __tablename__ = "ecosystem_project_settings"
+
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    min_stars: Mapped[int] = mapped_column(Integer, default=1000)
+    top_n: Mapped[int] = mapped_column(Integer, default=200)
+    refresh_interval_days: Mapped[int] = mapped_column(Integer, default=7)
+    auto_shallow_on_archive: Mapped[bool] = mapped_column(Boolean, default=True)
+    focus_topics: Mapped[list[str]] = mapped_column(JSON, default=list)
+    focus_languages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    shallow_concurrency: Mapped[int] = mapped_column(Integer, default=5)
+    deep_concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> EcosystemProjectSettings:
+        """Convert to Pydantic model."""
+        return EcosystemProjectSettings(
+            project_id=self.project_id,
+            min_stars=self.min_stars if self.min_stars is not None else 1000,
+            top_n=self.top_n if self.top_n is not None else 200,
+            refresh_interval_days=self.refresh_interval_days if self.refresh_interval_days is not None else 7,
+            auto_shallow_on_archive=bool(self.auto_shallow_on_archive) if self.auto_shallow_on_archive is not None else True,
+            focus_topics=self.focus_topics if isinstance(self.focus_topics, list) else [],
+            focus_languages=self.focus_languages if isinstance(self.focus_languages, list) else [],
+            shallow_concurrency=self.shallow_concurrency if self.shallow_concurrency is not None else 5,
+            deep_concurrency=self.deep_concurrency if self.deep_concurrency is not None else 3,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, p: EcosystemProjectSettings) -> "EcosystemProjectSettingsModel":
+        """Create an ORM instance from a Pydantic model."""
+        return cls(
+            project_id=p.project_id,
+            min_stars=p.min_stars,
+            top_n=p.top_n,
+            refresh_interval_days=p.refresh_interval_days,
+            auto_shallow_on_archive=p.auto_shallow_on_archive,
+            focus_topics=p.focus_topics,
+            focus_languages=p.focus_languages,
+            shallow_concurrency=p.shallow_concurrency,
+            deep_concurrency=p.deep_concurrency,
+            created_at=p.created_at,
+            updated_at=p.updated_at,
         )

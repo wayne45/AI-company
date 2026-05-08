@@ -107,7 +107,7 @@ export function ScanRunSection({ scanRun }: ScanRunSectionProps) {
         <div className="flex items-center justify-between py-1 border-b border-border/40">
           <span className="text-muted-foreground text-xs">耗时</span>
           <span className="font-medium text-xs">
-            {formatDuration(scanRun.started_at, scanRun.finished_at)}
+            {formatDuration(scanRun.started_at, scanRun.completed_at)}
           </span>
         </div>
         <div className="flex items-center justify-between py-1 border-b border-border/40">

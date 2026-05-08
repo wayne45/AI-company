@@ -107,6 +107,15 @@
             "timeout": 3000
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/hooks/meeting_ecosystem_writeback.py\"",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "TaskCreated": [

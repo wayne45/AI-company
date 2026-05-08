@@ -3,6 +3,98 @@
 All notable changes to AI Team OS will be documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
+## [1.5.0] — 2026-05-08
+
+### Added — Ecosystem Research Platform v2: Progressive Deep-Review Funnel
+
+Refactored the v1.4.0 "single-pass 5-section deep-review" into a **4-stage progressive knowledge-base funnel**, making ecosystem repos accumulate research findings over time instead of one-shot reports. Designed per user spec to prevent token waste on low-value repos and to enable knowledge recall across research cycles.
+
+- **Stage 0 — Auto shallow-summary on archive (Stage A/B)**
+  - New `EcosystemShallowQueueWorker` (552 LOC) auto-dispatches `ai-engineer` agents (5 concurrent) to summarise newly-archived repos
+  - Each shallow summary captures: core function / positioning / advantages / use case (200-400 chars)
+  - Worker runs every 5 min, returns `DispatchIntent[]` (no direct agent spawn — Leader uses Agent tool with `team_name=ecosystem-platform`)
+  - 8-class failure handling: `404→mark_deleted` / `403_private→mark_private` / `rate_limit→backoff+retry` / `5xx→exp_retry` / `agent_read→retry+swap` / `agent_timeout` / `json_parse→retry+example` / `fetch_style→pattern_record`
+  - **Self-learning mechanism**: same `fetch_style` failure ≥ 3 distinct repos → auto `pattern_record(type='failure')`, future agents read lessons via `pattern_search`
+
+- **Stage 1 — On-demand architecture analysis (Stage C)**
+  - New `ecosystem_deep_review_request_batch(tags, min_stars, limit)` MCP tool
+  - User picks research direction (e.g., "memory_system") → batch-dispatches `backend-architect` to read architecture key files
+  - Output: `architecture_md` field + `stage_status='architecture_done'`
+
+- **Stage 2 — Multi-perspective debate (Stage C)**
+  - New `ecosystem_trigger_debate(repo_ids, research_goal)` triggers existing `debate_start` (NOT a built-in debate engine — reuses meeting system)
+  - Leader has full control over debate participants and rounds (existing meeting capabilities preserved)
+  - **Meeting → Ecosystem reverse-writeback hook** (`meeting_ecosystem_writeback.py`): when meeting concludes with ecosystem keyword in topic, hook reminds Leader to dispatch agent that calls `ecosystem_apply_debate_result(risks_md / learnings_md / integration_md / integration_recommendation)`
+  - Output: 4 fields per finalist + `stage_status='debated'`
+
+- **Stage 3 — Reference / Integrate marking (Stage C)**
+  - `ecosystem_mark_as_reference` adds `lifecycle:reference` tag + `stage_status='referenced'`
+  - `ecosystem_start_integration` adds `lifecycle:integrated` tag + creates real integration task via `task_create` (existing task system, NOT a built-in implementation engine)
+  - Both paths preserve research findings for future quick recall (avoid re-deep-scanning)
+
+### Added — Project-customizable thresholds (Stage A)
+
+- New `EcosystemProjectSettings` table per project: `min_stars` / `top_n` / `refresh_interval_days` / `focus_topics` / `focus_languages` / `shallow_concurrency` / `deep_concurrency`
+- AI Team OS default: `min_stars=5000, top_n=200, focus_topics=['claude-code','mcp','agent-framework']`
+- Other projects default: `min_stars=1000, top_n=100`
+
+### Added — Active vs Full dual-view + append-only history (Stage A/D)
+
+- **Decision (D)**: Data is **append-only forever** — repos that fall below threshold are not deleted, just `is_active=False`. Stars climb back → auto-promoted to active set + Stage 0 re-queue
+- **Decision (E)**: Periodic shallow-refresh only scans active set (top_n by stars), saving GitHub API quota
+- New `EcosystemRepoStatusSnapshot` table records every scan's stars/pushed_at/is_archived/is_active for historical analysis
+- New `EcosystemRefresher` service (480 LOC) provides `shallow_refresh()` (diff-based, skips repos with no push since last refresh), `recompute_active_set()`, and `resurrect()` (revives deleted/private repos when GitHub returns 200 again)
+
+### Added — Frontend stage funnel UI (Stage E)
+
+- List page: stage colored badges (queued/shallow_done/architecture_done/debated/referenced/integrated/_failed) + 3 tabs (active/full/deleted)
+- Detail page: new "研究历程" timeline tab showing stage progression + agent outputs + `shallow_summary_history` snapshots
+- New `/ecosystem/research` candidate-filtering page: input research goal → tags-based candidate list with shallow_summary preview → multi-select to trigger Stage 1 → finalists trigger Stage 2
+- Project settings tab on project detail page: 8 fields (min_stars / top_n / refresh_interval_days / focus_topics / focus_languages / shallow_concurrency / deep_concurrency / auto_shallow_on_archive)
+- Failed repos: red badge + "Retry now" button (calls `POST /api/ecosystem/profiles/{id}/retry`)
+
+### Added — 11 new MCP tools
+
+- Stage 0: `ecosystem_apply_shallow_summary`, `ecosystem_shallow_queue_status`
+- Stage 1: `ecosystem_deep_review_request_batch`, `ecosystem_apply_architecture_md`
+- Stage 2: `ecosystem_trigger_debate`, `ecosystem_link_debate_meeting`, `ecosystem_apply_debate_result`
+- Stage 3: `ecosystem_mark_as_reference`, `ecosystem_start_integration`, `ecosystem_link_integration_task`
+- Refresh: (extended `ecosystem_scan_periodic` with refresh strategy)
+
+### Added — 8 new REST endpoints
+
+- `/api/ecosystem/lifecycle/*` (Stage 1/2/3 trigger paths)
+- `/api/ecosystem/profiles/{id}/retry` (manual retry for failed)
+- `GET/PUT /api/ecosystem/projects/{project_id}/settings`
+- `POST /api/ecosystem/shallow_queue/{apply_summary,tick}`, `GET /api/ecosystem/shallow_queue/status`
+
+### Schema changes (Stage A — fully backward compatible via COLUMNS_TO_ENSURE)
+
+- `EcosystemDeepReview` +8 fields: `stage_status` enum / `integration_md` / 4 stage timestamps / `debate_meeting_id` / `integration_task_id`
+- `EcosystemRepoProfile` +8 fields: `shallow_summary` / `last_shallow_refreshed_at` / `is_deleted` / `is_private_now` / `last_fetch_error` / `fetch_failure_count` / `is_active` / `active_rank`
+- 2 new tables: `EcosystemRepoStatusSnapshot` (append-only history) / `EcosystemProjectSettings` (per-project config)
+- Tag dictionary: 26 → 31 (added 5 lifecycle tags: `evaluating` / `reference` / `integrated` / `deleted` / `private_now`)
+- Tag source enum +1: `lifecycle` (auto-managed by Stage 3 transitions)
+
+### Tests
+
+- 1283+ unit tests passing (1264 baseline + 110+ new ecosystem tests across A/B/C/D/E)
+- 0 regressions
+- 6 pre-existing failures (CLI version flag / debate template / mcp_autostart / pipeline) verified unrelated via `git stash`
+
+### Architecture decisions (locked from user spec)
+
+- **(A)** Ecosystem is a **knowledge base, not a workflow engine** — Stage 2 reuses `debate_start`, Stage 3 reuses `task_create`. Ecosystem only records, recalls, and tags.
+- **(B)** Meeting → ecosystem reverse-writeback hook reminds Leader to record debate verdicts back to ecosystem (preserves Leader decision authority)
+- **(C)** Each project has independent thresholds + active/full dual-view
+- **(D)** Data append-only forever; stars-falling repos kept for potential future revival
+- **(E)** Periodic refresh only scans active set
+- **(F)** Rate-limit testing-driven concurrency tuning (no preset, observed and adjusted)
+
+### Notes
+
+- This release is **published to GitHub only** (continuing the v1.4.0 development-milestone pattern); PyPI publication deferred until further stability validation.
+
 ## [1.4.0] — 2026-05-07
 
 ### Added — Ecosystem Research Platform (Stage A-J)

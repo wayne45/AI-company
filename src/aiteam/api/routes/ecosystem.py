@@ -116,6 +116,19 @@ def _profile_to_dict(p: EcosystemRepoProfile) -> dict[str, Any]:
         "is_archived": p.is_archived,
         "scan_run_id": p.scan_run_id,
         "description_excerpt": p.description_excerpt,
+        # v1.5.0-A 新增字段（前端 stage 徽章 / 失败提示 / 活跃集 tab 依赖）
+        "shallow_summary": p.shallow_summary,
+        "last_shallow_refreshed_at": (
+            p.last_shallow_refreshed_at.isoformat()
+            if p.last_shallow_refreshed_at
+            else None
+        ),
+        "is_deleted": p.is_deleted,
+        "is_private_now": p.is_private_now,
+        "last_fetch_error": p.last_fetch_error,
+        "fetch_failure_count": p.fetch_failure_count,
+        "is_active": p.is_active,
+        "active_rank": p.active_rank,
     }
 
 
@@ -152,6 +165,10 @@ async def search_profiles(
     limit: int = Query(default=50, le=200),
     offset: int = Query(default=0, ge=0),
     facet_counts: bool = Query(default=False),
+    # v1.5.0-E 前端 tab 切换 / failed 筛选依赖（service 层若不识别会忽略）
+    is_active: bool | None = Query(default=None),
+    is_deleted: bool | None = Query(default=None),
+    stage_status: str = Query(default=""),
     repo: StorageRepository = Depends(get_scoped_repository),
 ) -> dict[str, Any]:
     """检索生态仓档案列表（Stage E 扩展版）。
@@ -159,6 +176,7 @@ async def search_profiles(
     - tags: 逗号分隔的标签名列表，配合 tag_match_mode (all/any) 实现 AND/OR 过滤
     - sort: stars / recency (pushed_at desc) / relevance (relevance_score desc)
     - facet_counts: True 时附带 category/language/archived 聚合分布
+    - is_active / is_deleted / stage_status: v1.5.0-E 前端筛选（活跃/全量 tab、failed 筛选）
     """
     pushed_after_dt = _parse_dt(pushed_after) if pushed_after else None
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -179,6 +197,35 @@ async def search_profiles(
         limit=limit,
         offset=offset,
     )
+
+    # v1.5.0-E 客户端二次过滤：is_active / is_deleted / stage_status
+    # （service 层尚未提供这些参数，先在路由层做兼容性筛选）
+    if is_active is not None:
+        profiles = [p for p in profiles if p.is_active == is_active]
+    if is_deleted is not None:
+        profiles = [p for p in profiles if p.is_deleted == is_deleted]
+    if stage_status:
+        # 通过最新 deep_review 的 stage_status 过滤（昂贵，仅 limit<=200 时可接受）
+        wanted_stages = {s.strip() for s in stage_status.split(",") if s.strip()}
+        if wanted_stages:
+            kept: list[EcosystemRepoProfile] = []
+            for p in profiles:
+                reviews = await repo.list_deep_reviews(repo_id=p.id, limit=1)
+                latest_review = reviews[0] if reviews else None
+                if latest_review:
+                    stage = (
+                        latest_review.stage_status.value
+                        if hasattr(latest_review.stage_status, "value")
+                        else latest_review.stage_status
+                    )
+                else:
+                    # 没有 review 时视作 queued（待 Stage 0）
+                    stage = "queued"
+                if stage in wanted_stages:
+                    kept.append(p)
+            profiles = kept
+    if is_active is not None or is_deleted is not None or stage_status:
+        total = len(profiles)
 
     payload: dict[str, Any] = {
         "profiles": [_profile_to_dict(p) for p in profiles],
@@ -332,6 +379,27 @@ def _deep_review_to_dict(dr: EcosystemDeepReview) -> dict[str, Any]:
         "completed_at": dr.completed_at.isoformat() if dr.completed_at else None,
         "duration_seconds": dr.duration_seconds,
         "created_at": dr.created_at.isoformat() if dr.created_at else None,
+        # v1.5.0-A 新增字段（前端研究历程 timeline 依赖）
+        "stage_status": (
+            dr.stage_status.value
+            if hasattr(dr.stage_status, "value")
+            else dr.stage_status
+        ),
+        "integration_md": getattr(dr, "integration_md", "") or "",
+        "shallow_completed_at": (
+            dr.shallow_completed_at.isoformat() if dr.shallow_completed_at else None
+        ),
+        "architecture_completed_at": (
+            dr.architecture_completed_at.isoformat()
+            if dr.architecture_completed_at
+            else None
+        ),
+        "debated_at": dr.debated_at.isoformat() if dr.debated_at else None,
+        "stage3_completed_at": (
+            dr.stage3_completed_at.isoformat() if dr.stage3_completed_at else None
+        ),
+        "debate_meeting_id": dr.debate_meeting_id,
+        "integration_task_id": dr.integration_task_id,
     }
 
 
@@ -1069,4 +1137,581 @@ async def summary_health(
     return {
         "markdown": md,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+# ============================================================
+# v1.5.0-B Stage 0 shallow-scan queue endpoints
+# ============================================================
+
+
+class ApplyShallowSummaryBody(BaseModel):
+    """Payload from a Stage 0 ai-engineer sub-agent reporting its summary."""
+
+    repo_id: str
+    shallow_summary: str = ""
+    deep_review_id: str | None = None
+    error_kind: str = ""
+    error_message: str = ""
+    http_status: int | None = None
+    rate_limit_remaining: int | None = None
+
+
+def _get_shallow_worker(
+    repo: StorageRepository,
+):
+    """Construct an EcosystemShallowQueueWorker bound to repo's project."""
+    from aiteam.services.ecosystem_shallow_queue import EcosystemShallowQueueWorker
+
+    return EcosystemShallowQueueWorker(repo=repo)
+
+
+@router.post("/shallow_queue/apply_summary")
+async def apply_shallow_summary(
+    body: ApplyShallowSummaryBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Apply a Stage 0 shallow summary or report a failure.
+
+    On success path:
+      - update_profile_shallow_summary
+      - update_deep_review_stage to SHALLOW_DONE
+    On failure path:
+      - delegate to worker.report_failure (handles classification, profile
+        flag updates, and self-learning bookkeeping).
+    """
+    from aiteam.services.ecosystem_shallow_queue import EcosystemShallowQueueWorker
+    from aiteam.types import EcosystemStageStatus
+
+    worker = EcosystemShallowQueueWorker(repo=repo)
+
+    if body.error_kind:
+        decision = await worker.report_failure(
+            body.repo_id,
+            error_kind=body.error_kind,
+            http_status=body.http_status,
+            error_message=body.error_message,
+            rate_limit_remaining=body.rate_limit_remaining,
+            deep_review_id=body.deep_review_id,
+        )
+        return {
+            "success": False,
+            "failure_class": decision.failure_class,
+            "immediate_retry": decision.immediate_retry,
+            "retry_delay_seconds": decision.retry_delay_seconds,
+            "marked_deleted": decision.mark_deleted,
+            "marked_private": decision.mark_private,
+        }
+
+    summary = (body.shallow_summary or "").strip()
+    if not summary:
+        raise HTTPException(
+            status_code=400,
+            detail="shallow_summary required when error_kind not set",
+        )
+
+    profile = await repo.update_profile_shallow_summary(
+        body.repo_id, shallow_summary=summary
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail="repo profile not found")
+
+    review = None
+    if body.deep_review_id:
+        review = await repo.update_deep_review_stage(
+            body.deep_review_id,
+            EcosystemStageStatus.SHALLOW_DONE,
+        )
+        # Also mark the workflow row completed so the downstream UI
+        # treats the run as finished.
+        if review is not None:
+            await repo.update_deep_review(
+                body.deep_review_id,
+                status="completed",
+                completed_at=datetime.now(tz=timezone.utc),
+            )
+
+    return {
+        "success": True,
+        "repo_id": profile.id,
+        "shallow_summary_length": len(profile.shallow_summary),
+        "stage_status": review.stage_status.value if review else None,
+    }
+
+
+@router.get("/shallow_queue/status")
+async def shallow_queue_status(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Return Stage 0 queue metrics for the active project."""
+    worker = _get_shallow_worker(repo)
+    return await worker.queue_status()
+
+
+@router.post("/shallow_queue/tick")
+async def shallow_queue_tick(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Run one Stage 0 worker tick on demand (Leader-driven)."""
+    worker = _get_shallow_worker(repo)
+    result = await worker.tick()
+    return {
+        "queued": result.queued,
+        "dispatched": result.dispatched,
+        "skipped_inflight": result.skipped_inflight,
+        "errors": result.errors,
+        "intents": [
+            {
+                "repo_id": i.repo_id,
+                "repo_full_name": i.repo_full_name,
+                "deep_review_id": i.deep_review_id,
+                "prompt": i.prompt,
+                "timeout_seconds": i.timeout_seconds,
+            }
+            for i in result.intents
+        ],
+    }
+
+
+# ============================================================
+# v1.5.0-C — Stage 1 / 2 / 3 lifecycle trigger routes
+# ============================================================
+
+
+class DeepReviewRequestBatchBody(BaseModel):
+    """Stage 1 batch request payload (POST /api/ecosystem/lifecycle/request_batch)."""
+
+    tags: list[str] = Field(default_factory=list)
+    min_stars: int | None = None
+    limit: int = 20
+    research_goal: str = ""
+
+
+class ApplyArchitectureMdBody(BaseModel):
+    """Stage 1 writeback payload."""
+
+    deep_review_id: str
+    architecture_md: str = ""
+    agent_id: str | None = None
+    error_message: str = ""  # 非空时进入 architecture_failed 路径
+
+
+class TriggerDebateBody(BaseModel):
+    """Stage 2 debate trigger payload."""
+
+    repo_ids: list[str] = Field(default_factory=list)
+    research_goal: str = ""
+    suggested_advocate: str = "backend-architect"
+    suggested_critic: str = "code-reviewer"
+    suggested_judge: str = "team-lead"
+
+
+class LinkDebateMeetingBody(BaseModel):
+    """Stage 2 link meeting payload (called after debate_start)."""
+
+    review_ids: list[str] = Field(default_factory=list)
+    meeting_id: str
+
+
+class ApplyDebateResultBody(BaseModel):
+    """Stage 2 result writeback payload."""
+
+    deep_review_id: str
+    risks_md: str = ""
+    learnings_md: str = ""
+    integration_md: str = ""
+    integration_recommendation: str = ""
+    agent_id: str | None = None
+
+
+class MarkAsReferenceBody(BaseModel):
+    """Stage 3 reference path payload."""
+
+    deep_review_id: str
+    agent_id: str | None = None
+    confidence: float = 1.0
+
+
+class StartIntegrationBody(BaseModel):
+    """Stage 3 integrate path — request task payload."""
+
+    deep_review_id: str
+    title: str = ""
+    description: str = ""
+    priority: str = "high"
+    horizon: str = "mid"
+    extra_tags: list[str] = Field(default_factory=list)
+
+
+class LinkIntegrationTaskBody(BaseModel):
+    """Stage 3 link task payload (called after task_create)."""
+
+    deep_review_id: str
+    task_id: str
+
+
+def _get_lifecycle_service(repo: StorageRepository):
+    """Construct an EcosystemLifecycleService bound to repo's project scope."""
+    from aiteam.services.ecosystem_lifecycle import EcosystemLifecycleService
+
+    return EcosystemLifecycleService(repo)
+
+
+@router.post("/lifecycle/request_batch")
+async def lifecycle_request_batch(
+    body: DeepReviewRequestBatchBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 1: queue a batch of deep_review rows for tag-filtered candidates.
+
+    Returns dispatch intents for backend-architect sub-agents. Leader is
+    responsible for actually spawning each agent via the Agent tool.
+    """
+    service = _get_lifecycle_service(repo)
+    try:
+        intents = await service.request_deep_review_batch(
+            tags=body.tags,
+            min_stars=body.min_stars,
+            limit=body.limit,
+            research_goal=body.research_goal,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "dispatched": len(intents),
+        "intents": [
+            {
+                "repo_id": i.repo_id,
+                "repo_full_name": i.repo_full_name,
+                "deep_review_id": i.deep_review_id,
+                "prompt": i.prompt,
+                "timeout_seconds": i.timeout_seconds,
+                "project_id": i.project_id,
+            }
+            for i in intents
+        ],
+    }
+
+
+@router.post("/lifecycle/apply_architecture_md")
+async def lifecycle_apply_architecture_md(
+    body: ApplyArchitectureMdBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 1 writeback: agent submits architecture_md or reports failure."""
+    from aiteam.types import EcosystemDeepReviewStatus, EcosystemStageStatus
+
+    service = _get_lifecycle_service(repo)
+
+    # Failure path — empty architecture_md + non-empty error_message
+    if not body.architecture_md.strip() and body.error_message:
+        review = await repo.get_deep_review(body.deep_review_id)
+        if review is None:
+            raise HTTPException(status_code=404, detail="deep_review not found")
+        await repo.update_deep_review(
+            body.deep_review_id,
+            status=EcosystemDeepReviewStatus.FAILED,
+            risks_md=(review.risks_md or "")
+            + f"\n\n[architecture failed] {body.error_message}",
+            completed_at=datetime.now(tz=timezone.utc),
+        )
+        await repo.update_deep_review_stage(
+            body.deep_review_id,
+            EcosystemStageStatus.ARCHITECTURE_FAILED,
+        )
+        return {
+            "success": False,
+            "stage_status": EcosystemStageStatus.ARCHITECTURE_FAILED.value,
+            "error": body.error_message,
+        }
+
+    try:
+        review = await service.apply_architecture_md(
+            body.deep_review_id,
+            architecture_md=body.architecture_md,
+            agent_id=body.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "deep_review_id": review.id,
+        "stage_status": review.stage_status.value,
+        "architecture_md_length": len(review.architecture_md),
+    }
+
+
+@router.post("/lifecycle/trigger_debate")
+async def lifecycle_trigger_debate(
+    body: TriggerDebateBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 2: build a debate dispatch intent (caller must invoke debate_start)."""
+    service = _get_lifecycle_service(repo)
+    try:
+        intent = await service.trigger_debate(
+            repo_ids=body.repo_ids,
+            research_goal=body.research_goal,
+            suggested_advocate=body.suggested_advocate,
+            suggested_critic=body.suggested_critic,
+            suggested_judge=body.suggested_judge,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "review_ids": intent.review_ids,
+        "repo_full_names": intent.repo_full_names,
+        "research_goal": intent.research_goal,
+        "suggested_topic": intent.suggested_topic,
+        "suggested_advocate": intent.suggested_advocate,
+        "suggested_critic": intent.suggested_critic,
+        "suggested_judge": intent.suggested_judge,
+        "project_id": intent.project_id,
+        "next_action": (
+            "调 debate_start(topic=suggested_topic, advocate=..., critic=..., "
+            "judge=...) 创建会议，然后再调 /lifecycle/link_debate_meeting "
+            "把 meeting.id 写回 review_ids。"
+        ),
+    }
+
+
+@router.post("/lifecycle/link_debate_meeting")
+async def lifecycle_link_debate_meeting(
+    body: LinkDebateMeetingBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 2 helper: link meeting_id to review rows after debate_start."""
+    service = _get_lifecycle_service(repo)
+    updated = await service.link_debate_meeting(
+        review_ids=body.review_ids,
+        meeting_id=body.meeting_id,
+    )
+    return {
+        "success": True,
+        "linked": updated,
+        "meeting_id": body.meeting_id,
+    }
+
+
+@router.post("/lifecycle/apply_debate_result")
+async def lifecycle_apply_debate_result(
+    body: ApplyDebateResultBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 2 writeback: agent submits debate conclusion → debated."""
+    service = _get_lifecycle_service(repo)
+    try:
+        review = await service.apply_debate_result(
+            body.deep_review_id,
+            risks_md=body.risks_md,
+            learnings_md=body.learnings_md,
+            integration_md=body.integration_md,
+            integration_recommendation=body.integration_recommendation,
+            agent_id=body.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "deep_review_id": review.id,
+        "stage_status": review.stage_status.value,
+        "debated_at": review.debated_at.isoformat() if review.debated_at else None,
+    }
+
+
+@router.post("/lifecycle/mark_as_reference")
+async def lifecycle_mark_as_reference(
+    body: MarkAsReferenceBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 3 reference: 加 lifecycle:reference tag + 推进 referenced。"""
+    service = _get_lifecycle_service(repo)
+    review = await service.mark_as_reference(
+        body.deep_review_id,
+        agent_id=body.agent_id,
+        confidence=body.confidence,
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "deep_review_id": review.id,
+        "stage_status": review.stage_status.value,
+        "stage3_completed_at": (
+            review.stage3_completed_at.isoformat()
+            if review.stage3_completed_at
+            else None
+        ),
+    }
+
+
+@router.post("/lifecycle/start_integration")
+async def lifecycle_start_integration(
+    body: StartIntegrationBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 3 integrate: build a task dispatch intent."""
+    service = _get_lifecycle_service(repo)
+    try:
+        intent = await service.start_integration(
+            body.deep_review_id,
+            title=body.title,
+            description=body.description,
+            priority=body.priority,
+            horizon=body.horizon,
+            extra_tags=body.extra_tags,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "review_id": intent.review_id,
+        "repo_id": intent.repo_id,
+        "repo_full_name": intent.repo_full_name,
+        "task_payload": {
+            "title": intent.title,
+            "description": intent.description,
+            "priority": intent.priority,
+            "horizon": intent.horizon,
+            "tags": intent.tags,
+        },
+        "project_id": intent.project_id,
+        "next_action": (
+            "调 POST /api/projects/{project_id}/tasks 创建任务，然后再调 "
+            "/lifecycle/link_integration_task 把 task.id 写回 review。"
+        ),
+    }
+
+
+@router.post("/lifecycle/link_integration_task")
+async def lifecycle_link_integration_task(
+    body: LinkIntegrationTaskBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Stage 3 helper: link task_id to review row after task_create."""
+    service = _get_lifecycle_service(repo)
+    review = await service.link_integration_task(
+        deep_review_id=body.deep_review_id,
+        task_id=body.task_id,
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "deep_review_id": review.id,
+        "integration_task_id": review.integration_task_id,
+        "stage_status": review.stage_status.value,
+    }
+
+
+# ============================================================
+# Project Settings (v1.5.0-E 决策 12.1: 项目详情页 Ecosystem 设置 tab)
+# ============================================================
+
+
+class ProjectSettingsBody(BaseModel):
+    """项目级 ecosystem 配置 (PUT 入参)。"""
+
+    min_stars: int = Field(default=1000, ge=0)
+    top_n: int = Field(default=200, ge=1, le=1000)
+    refresh_interval_days: int = Field(default=7, ge=1, le=90)
+    auto_shallow_on_archive: bool = True
+    focus_topics: list[str] = Field(default_factory=list)
+    focus_languages: list[str] = Field(default_factory=list)
+    shallow_concurrency: int = Field(default=5, ge=1, le=20)
+    deep_concurrency: int = Field(default=3, ge=1, le=10)
+
+
+def _settings_to_dict(s: Any) -> dict[str, Any]:
+    """Serialize EcosystemProjectSettings for API."""
+    return {
+        "project_id": s.project_id,
+        "min_stars": s.min_stars,
+        "top_n": s.top_n,
+        "refresh_interval_days": s.refresh_interval_days,
+        "auto_shallow_on_archive": s.auto_shallow_on_archive,
+        "focus_topics": s.focus_topics,
+        "focus_languages": s.focus_languages,
+        "shallow_concurrency": s.shallow_concurrency,
+        "deep_concurrency": s.deep_concurrency,
+        "created_at": s.created_at.isoformat() if s.created_at else None,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/projects/{project_id}/settings")
+async def get_project_settings(
+    project_id: str,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """获取项目的 ecosystem 配置（不存在则按默认值创建）。"""
+    settings = await repo.ensure_ecosystem_project_settings(project_id)
+    return _settings_to_dict(settings)
+
+
+@router.put("/projects/{project_id}/settings")
+async def update_project_settings(
+    project_id: str,
+    body: ProjectSettingsBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """更新项目的 ecosystem 配置。"""
+    from aiteam.types import EcosystemProjectSettings as _Settings
+
+    payload = _Settings(
+        project_id=project_id,
+        min_stars=body.min_stars,
+        top_n=body.top_n,
+        refresh_interval_days=body.refresh_interval_days,
+        auto_shallow_on_archive=body.auto_shallow_on_archive,
+        focus_topics=body.focus_topics,
+        focus_languages=body.focus_languages,
+        shallow_concurrency=body.shallow_concurrency,
+        deep_concurrency=body.deep_concurrency,
+    )
+    saved = await repo.upsert_ecosystem_project_settings(payload)
+    return _settings_to_dict(saved)
+
+
+# ============================================================
+# Failed repo retry (v1.5.0-E 决策: 失败仓立即重试按钮)
+# ============================================================
+
+
+class RetryFailedRepoBody(BaseModel):
+    """重置仓的失败状态以触发下一轮 Stage 0 浅扫。"""
+
+    reason: str = "manual_retry"
+
+
+@router.post("/profiles/{repo_id}/retry")
+async def retry_failed_repo(
+    repo_id: str,
+    body: RetryFailedRepoBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """重置 fetch_failure_count + last_fetch_error，让仓重新进入浅扫队列。
+
+    用于前端 "立即重试" 按钮。
+    """
+    profile = await repo.get_ecosystem_profile_by_id(repo_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="ecosystem repo not found")
+
+    # 清失败计数 + 错误消息（不动 is_deleted/is_private_now，由 scanner 重新判定）
+    profile.fetch_failure_count = 0
+    profile.last_fetch_error = ""
+    await repo.upsert_ecosystem_profile(profile)
+    return {
+        "success": True,
+        "repo_id": repo_id,
+        "repo_full_name": profile.repo_full_name,
+        "reason": body.reason,
+        "next_action": "Stage 0 浅扫队列下次 tick 会重新派遣 agent",
     }

@@ -124,17 +124,18 @@ Runs entirely within your existing Claude Code subscription:
 - MCP tools, hooks, and Agent templates are all local
 - 100% utilization of your CC plan
 
-### 8. Ecosystem Research Platform (new in 1.4.0)
+### 8. Ecosystem Research Platform (progressive funnel in v1.5.0)
 
-Project-isolated discovery + tagging + deep-review workflow for the Claude/MCP/agent open-source ecosystem:
+A project-isolated **knowledge base** that accumulates research findings over time. Each repo progresses through 4 stages, with token-efficient triggers and append-only history:
 
-- **Periodic GitHub scanning**: cron-driven incremental scan with multi-strategy filtering (topic search, owner blacklist, keyword whitelist), audit trail via `EcosystemScanRun`, GitHub API graceful degradation
-- **3-layer auto-tagging**: Layer 1 GitHub topics direct mapping, Layer 2 keyword + language + docs-only rules, Layer 3 LLM dispatch_plan for sub-agent fan-out (max-20 concurrent). 188 repos baseline: avg 2.05 tags/repo, 1.5% zero-tag rate
-- **Multi-dim search**: 11 parameters (query / tags AND / min_stars / language / sort_by / has_deep_review / etc.) with 5 composite indexes — search p95 < 15ms on 265 repos
-- **Deep-review workflow**: 5-section report template (positioning / architecture / lessons / risks / integration), `ecosystem_deep_review_request` dispatches Explore + backend agent, `PostToolUse` hook auto-links saved reports
-- **Auto-summary**: 4 markdown tools (weekly briefing / by-tag / top-N / health) with auto `report_save` for dashboard rendering
-- **Project isolation**: each project has its own ecosystem repo collection; `X-Project-Id` HTTP header routing; 21-tag dictionary shared globally as seed
-- **Dashboard `/ecosystem` page**: list with filters + detail page consuming v2 API + 4 components (CapabilityTags / DeepReviewSection / RelationsSection / ScanRunSection)
+- **Stage 0 — Auto shallow-summary on archive**: newly-archived repos automatically get a 200-400 char `ai-engineer` summary (core function / positioning / advantages). 8-class failure handling with **self-learning** (3+ same-class fails → `pattern_record`, future agents read lessons via `pattern_search`). Worker auto-revives deleted/private repos when GitHub returns 200 again.
+- **Stage 1 — On-demand architecture analysis**: user picks research direction ("memory_system") → batch-dispatch `backend-architect` agents to read architecture key files
+- **Stage 2 — Multi-perspective debate**: triggers existing `debate_start` (NOT a built-in debate engine — **reuses meeting system**). Meeting → ecosystem reverse-writeback hook reminds Leader to record verdicts back to deep_review
+- **Stage 3 — Reference / Integrate marking**: `mark_as_reference` adds tag for future quick recall (avoid re-deep-scanning); `start_integration` triggers existing `task_create` for actual implementation
+- **Project-customizable thresholds**: each project sets `min_stars` / `top_n` / `refresh_interval_days` / `focus_topics`. AI Team OS default: stars ≥ 5K, top 200, focus on claude-code / mcp / agent-framework
+- **Active vs Full dual-view**: data is **append-only forever**. Stars-falling repos kept (just `is_active=False`); stars climbing back auto-promotes + re-queues Stage 0
+- **Dashboard `/ecosystem`**: list with stage badges + research timeline + candidate-filter page (`/ecosystem/research`) + per-project settings tab
+- **30+ MCP tools / 15+ REST endpoints / SQLite append-only history snapshots**
 
 ---
 

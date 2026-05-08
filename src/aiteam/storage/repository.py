@@ -6,7 +6,7 @@ Upper-layer modules access data only through this interface.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import String as SAString
@@ -21,8 +21,10 @@ from aiteam.storage.models import (
     ChannelMessageModel,
     CrossMessageModel,
     EcosystemDeepReviewModel,
+    EcosystemProjectSettingsModel,
     EcosystemRelationModel,
     EcosystemRepoProfileModel,
+    EcosystemRepoStatusSnapshotModel,
     EcosystemRepoTagModel,
     EcosystemScanRunModel,
     EcosystemTagModel,
@@ -49,10 +51,13 @@ from aiteam.types import (
     CrossMessageType,
     EcosystemDeepReview,
     EcosystemDeepReviewStatus,
+    EcosystemProjectSettings,
     EcosystemRelation,
     EcosystemRepoProfile,
+    EcosystemRepoStatusSnapshot,
     EcosystemRepoTag,
     EcosystemScanRun,
+    EcosystemStageStatus,
     EcosystemTag,
     Event,
     EventType,
@@ -3171,3 +3176,402 @@ class StorageRepository:
                 counts[label] = int(result.rowcount or 0)
 
             return counts
+
+    # ================================================================
+    # v1.5.0-A: Stage status helpers (DeepReview 渐进式漏斗)
+    # ================================================================
+
+    async def update_deep_review_stage(
+        self,
+        review_id: str,
+        stage_status: EcosystemStageStatus | str,
+        *,
+        completed_at: datetime | None = None,
+        debate_meeting_id: str | None = None,
+        integration_task_id: str | None = None,
+        integration_md: str | None = None,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview | None:
+        """推进 DeepReview 的 stage_status，自动写对应阶段时间戳。
+
+        Args:
+            review_id: 目标 DeepReview id。
+            stage_status: 新 stage 值；接受 enum 或字符串。
+            completed_at: 阶段完成时间，默认当前 UTC 时间；用于回填历史时显式指定。
+            debate_meeting_id: stage_status=DEBATED 时关联的会议 id。
+            integration_task_id: stage_status=INTEGRATED 时关联的任务 id。
+            integration_md: 集成建议的 markdown 内容。
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+
+        Returns:
+            更新后的 DeepReview Pydantic 模型；找不到则返回 None。
+        """
+        if isinstance(stage_status, str):
+            stage_status = EcosystemStageStatus(stage_status)
+
+        ts = completed_at or datetime.now(tz=timezone.utc)
+
+        # 不同阶段写入不同时间戳字段
+        timestamp_fields: dict[str, datetime | None] = {}
+        if stage_status == EcosystemStageStatus.SHALLOW_DONE:
+            timestamp_fields["shallow_completed_at"] = ts
+        elif stage_status == EcosystemStageStatus.ARCHITECTURE_DONE:
+            timestamp_fields["architecture_completed_at"] = ts
+        elif stage_status == EcosystemStageStatus.DEBATED:
+            timestamp_fields["debated_at"] = ts
+        elif stage_status in (
+            EcosystemStageStatus.REFERENCED,
+            EcosystemStageStatus.INTEGRATED,
+        ):
+            timestamp_fields["stage3_completed_at"] = ts
+
+        update_kwargs: dict[str, Any] = {"stage_status": stage_status.value}
+        update_kwargs.update(timestamp_fields)
+        if debate_meeting_id is not None:
+            update_kwargs["debate_meeting_id"] = debate_meeting_id
+        if integration_task_id is not None:
+            update_kwargs["integration_task_id"] = integration_task_id
+        if integration_md is not None:
+            update_kwargs["integration_md"] = integration_md
+        if project_id is not None:
+            update_kwargs["_project_id"] = project_id
+
+        return await self.update_deep_review(review_id, **update_kwargs)
+
+    async def list_deep_reviews_by_stage(
+        self,
+        stage_status: EcosystemStageStatus | str,
+        repo_id: str = "",
+        limit: int = 50,
+        project_id: str | None = None,
+    ) -> list[EcosystemDeepReview]:
+        """按 stage_status 列出 deep reviews。
+
+        v1.5.0 漏斗 UI/Worker 使用：例如查 ``shallow_done`` 的所有仓供 Stage 1
+        候选展示，或查 ``shallow_failed`` 仓供 manual retry 列表。
+        """
+        if isinstance(stage_status, EcosystemStageStatus):
+            stage_status = stage_status.value
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel)
+            stmt = self._apply_project_filter(stmt, EcosystemDeepReviewModel)
+            if project_id:
+                stmt = stmt.where(EcosystemDeepReviewModel.project_id == project_id)
+            stmt = stmt.where(EcosystemDeepReviewModel.stage_status == stage_status)
+            if repo_id:
+                stmt = stmt.where(EcosystemDeepReviewModel.repo_id == repo_id)
+            stmt = stmt.order_by(EcosystemDeepReviewModel.created_at.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # v1.5.0-A: Failed flag helpers (Profile 失败追踪)
+    # ================================================================
+
+    async def mark_profile_deleted(
+        self,
+        repo_id: str,
+        *,
+        error_message: str = "",
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """把 profile 标为 GitHub 端被删除。
+
+        - 设置 is_deleted=True / is_active=False；
+        - 失败次数 +1，记最近错误消息；
+        - lifecycle 标签由调用方另行 add_repo_tag('deleted', source='lifecycle')。
+        """
+        return await self._update_profile_failure_state(
+            repo_id,
+            is_deleted=True,
+            is_active=False,
+            last_fetch_error=error_message or "GitHub 404",
+            project_id=project_id,
+        )
+
+    async def mark_profile_private(
+        self,
+        repo_id: str,
+        *,
+        error_message: str = "",
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """把 profile 标为 GitHub 端被设为私密 (403 forbidden, not rate limit)。"""
+        return await self._update_profile_failure_state(
+            repo_id,
+            is_private_now=True,
+            is_active=False,
+            last_fetch_error=error_message or "GitHub 403 forbidden",
+            project_id=project_id,
+        )
+
+    async def mark_profile_fetch_failure(
+        self,
+        repo_id: str,
+        *,
+        error_message: str,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """记录一次抓取失败，failure_count +1。
+
+        不切换 is_deleted/is_private/is_active；调用方根据错误类型决定是否升级到
+        mark_profile_deleted/private。
+        """
+        return await self._update_profile_failure_state(
+            repo_id,
+            last_fetch_error=error_message,
+            project_id=project_id,
+            increment_failure=True,
+        )
+
+    async def clear_profile_failure(
+        self,
+        repo_id: str,
+        *,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """复活：抓取重新成功，清空失败状态 (decision §3.3 复活机制)。
+
+        - is_deleted/is_private_now → False
+        - is_active → True
+        - last_fetch_error → ''
+        - fetch_failure_count → 0
+        """
+        return await self._update_profile_failure_state(
+            repo_id,
+            is_deleted=False,
+            is_private_now=False,
+            is_active=True,
+            last_fetch_error="",
+            fetch_failure_count_reset=True,
+            project_id=project_id,
+        )
+
+    async def _update_profile_failure_state(
+        self,
+        repo_id: str,
+        *,
+        is_deleted: bool | None = None,
+        is_private_now: bool | None = None,
+        is_active: bool | None = None,
+        last_fetch_error: str | None = None,
+        increment_failure: bool = False,
+        fetch_failure_count_reset: bool = False,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """内部统一入口，更新 profile 失败/活跃相关字段。"""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.id == repo_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            if is_deleted is not None:
+                row.is_deleted = is_deleted
+            if is_private_now is not None:
+                row.is_private_now = is_private_now
+            if is_active is not None:
+                row.is_active = is_active
+            if last_fetch_error is not None:
+                row.last_fetch_error = last_fetch_error
+            if increment_failure:
+                row.fetch_failure_count = (row.fetch_failure_count or 0) + 1
+            if fetch_failure_count_reset:
+                row.fetch_failure_count = 0
+            await session.flush()
+            return row.to_pydantic()
+
+    async def update_profile_active_set(
+        self,
+        repo_id: str,
+        *,
+        is_active: bool,
+        active_rank: int | None,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """更新仓的活跃集状态 (recompute_active_set 内部用)。"""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.id == repo_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            row.is_active = is_active
+            row.active_rank = active_rank
+            await session.flush()
+            return row.to_pydantic()
+
+    async def update_profile_shallow_summary(
+        self,
+        repo_id: str,
+        *,
+        shallow_summary: str,
+        refreshed_at: datetime | None = None,
+        project_id: str | None = None,
+    ) -> EcosystemRepoProfile | None:
+        """写入 Stage 0 浅扫总结，更新 last_shallow_refreshed_at。"""
+        effective_pid = self._effective_project_id(project_id)
+        ts = refreshed_at or datetime.now(tz=timezone.utc)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.id == repo_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            row.shallow_summary = shallow_summary or ""
+            row.last_shallow_refreshed_at = ts
+            await session.flush()
+            return row.to_pydantic()
+
+    # ================================================================
+    # v1.5.0-A: Status snapshot helpers (append-only 决策 D)
+    # ================================================================
+
+    async def create_status_snapshot(
+        self,
+        snapshot: EcosystemRepoStatusSnapshot,
+        project_id: str | None = None,
+    ) -> EcosystemRepoStatusSnapshot:
+        """写入一条状态快照 (append-only)。
+
+        Args:
+            snapshot: 状态快照 Pydantic。
+            project_id: 显式作用域；空时回退到 _project_scope/snapshot.project_id。
+        """
+        effective_pid = self._effective_project_id(project_id) or snapshot.project_id
+        if effective_pid and not snapshot.project_id:
+            snapshot.project_id = effective_pid
+        async with get_session(self._db_url) as session:
+            session.add(EcosystemRepoStatusSnapshotModel.from_pydantic(snapshot))
+        return snapshot
+
+    async def list_status_snapshots(
+        self,
+        repo_id: str = "",
+        scan_run_id: str = "",
+        limit: int = 100,
+        project_id: str | None = None,
+    ) -> list[EcosystemRepoStatusSnapshot]:
+        """列出状态快照，按 snapshot_at 降序。
+
+        参数：
+            repo_id: 按仓过滤；空 = 不过滤。
+            scan_run_id: 按 scan 批次过滤；空 = 不过滤。
+            project_id: 显式作用域；空时由 _project_scope 自动注入。
+        """
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoStatusSnapshotModel)
+            stmt = self._apply_project_filter(stmt, EcosystemRepoStatusSnapshotModel)
+            if project_id:
+                stmt = stmt.where(EcosystemRepoStatusSnapshotModel.project_id == project_id)
+            if repo_id:
+                stmt = stmt.where(EcosystemRepoStatusSnapshotModel.repo_id == repo_id)
+            if scan_run_id:
+                stmt = stmt.where(
+                    EcosystemRepoStatusSnapshotModel.scan_run_id == scan_run_id
+                )
+            stmt = stmt.order_by(
+                EcosystemRepoStatusSnapshotModel.snapshot_at.desc()
+            ).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # v1.5.0-A: Project ecosystem settings helpers
+    # ================================================================
+
+    async def get_ecosystem_project_settings(
+        self,
+        project_id: str,
+    ) -> EcosystemProjectSettings | None:
+        """按 project_id 获取项目的 ecosystem 配置。"""
+        if not project_id:
+            return None
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemProjectSettingsModel).where(
+                EcosystemProjectSettingsModel.project_id == project_id
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def upsert_ecosystem_project_settings(
+        self,
+        settings: EcosystemProjectSettings,
+    ) -> EcosystemProjectSettings:
+        """按 project_id 主键 upsert 项目 ecosystem 配置。
+
+        已存在则更新所有字段（除 created_at）；不存在则插入。
+        updated_at 总是设为当前 UTC。
+        """
+        if not settings.project_id:
+            raise ValueError("project_id 不能为空")
+        now = datetime.now(tz=timezone.utc)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemProjectSettingsModel).where(
+                EcosystemProjectSettingsModel.project_id == settings.project_id
+            )
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                settings.updated_at = now
+                session.add(EcosystemProjectSettingsModel.from_pydantic(settings))
+            else:
+                row.min_stars = settings.min_stars
+                row.top_n = settings.top_n
+                row.refresh_interval_days = settings.refresh_interval_days
+                row.auto_shallow_on_archive = settings.auto_shallow_on_archive
+                row.focus_topics = settings.focus_topics
+                row.focus_languages = settings.focus_languages
+                row.shallow_concurrency = settings.shallow_concurrency
+                row.deep_concurrency = settings.deep_concurrency
+                row.updated_at = now
+                settings.updated_at = now
+        return settings
+
+    async def ensure_ecosystem_project_settings(
+        self,
+        project_id: str,
+        *,
+        is_ai_team_os: bool = False,
+    ) -> EcosystemProjectSettings:
+        """确保项目存在 ecosystem 设置；不存在则按默认值创建。
+
+        AI Team OS 项目用更严格默认 (min_stars=5000, focus claude/mcp/agent topics)；
+        其他项目用通用默认 (min_stars=1000, top_n=100, focus_topics=[])。
+
+        幂等：已存在则直接返回，不覆盖人工修改。
+        """
+        existing = await self.get_ecosystem_project_settings(project_id)
+        if existing is not None:
+            return existing
+        if is_ai_team_os:
+            payload = EcosystemProjectSettings(
+                project_id=project_id,
+                min_stars=5000,
+                top_n=200,
+                focus_topics=["claude-code", "mcp", "agent-framework"],
+            )
+        else:
+            payload = EcosystemProjectSettings(
+                project_id=project_id,
+                min_stars=1000,
+                top_n=100,
+            )
+        return await self.upsert_ecosystem_project_settings(payload)

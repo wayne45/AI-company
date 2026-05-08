@@ -124,17 +124,18 @@ CEO 从不空闲。它按任务墙优先级持续推进工作：
 - MCP 工具、Hooks 和 Agent 模板全部本地运行
 - 完全复用你的 CC 套餐
 
-### 8. 生态研究平台（1.4.0 新增）
+### 8. 生态研究平台（v1.5.0 渐进式漏斗）
 
-针对 Claude / MCP / Agent 开源生态的项目隔离发现 + 打标 + 深度审查工作流：
+项目隔离的**知识库**，研究产物随时间累加。每个仓走过 4 阶段，token 高效触发 + append-only 历史：
 
-- **周期 GitHub 扫描**：cron 驱动增量扫描 + 多策略过滤（topic 搜索 / owner 黑名单 / 关键词白名单），通过 `EcosystemScanRun` 审计 + GitHub API 优雅降级
-- **三层自动打标**：Layer 1 GitHub topics 直接映射 / Layer 2 关键词+语言+docs-only 规则 / Layer 3 LLM dispatch_plan 派子 agent（最多 20 并发）。188 仓基线：平均 2.05 tags/repo，0 标签率仅 1.5%
-- **多维搜索**：11 个参数（query / tags AND / min_stars / language / sort_by / has_deep_review 等）+ 5 个复合索引 — 265 仓 search p95 < 15ms
-- **深度审查工作流**：5 段式报告模板（真实定位 / 架构 / 借鉴点 / 风险 / 集成建议），`ecosystem_deep_review_request` 派 Explore + 后端 agent，`PostToolUse` hook 自动关联已保存报告
-- **自动汇总**：4 个 markdown 工具（周报 / 按标签 / Top N / 平台自检）+ 自动 `report_save` 入档便于 Dashboard 渲染
-- **项目隔离**：每个项目有自己的 ecosystem 仓集合；通过 `X-Project-Id` HTTP header 路由；21 个 seed 标签字典全局共享
-- **Dashboard `/ecosystem` 页面**：列表带筛选 + 详情页消费 v2 API + 4 个新组件（CapabilityTags / DeepReviewSection / RelationsSection / ScanRunSection）
+- **Stage 0 — 入档即浅扫**：新入档仓自动派 `ai-engineer` 出 200-400 字总结（核心功能 / 定位 / 优势）。8 类失败处理 + **自学习机制**（同类失败 ≥ 3 仓 → `pattern_record`，未来 agent 通过 `pattern_search` 读 lessons 优化策略）。Worker 自动复活删库/私密恢复 200 的仓
+- **Stage 1 — 按需架构分析**：用户挑研究方向（"memory_system"）→ 批量派 `backend-architect` 读架构关键文件
+- **Stage 2 — 多角度辩论**：触发现有 `debate_start`（**不内建辩论引擎，复用会议系统**）。会议→生态库反向写入 hook 提醒 Leader 把辩论结论回写到 deep_review
+- **Stage 3 — 参考 / 集成标记**：`mark_as_reference` 加 tag 便于未来快速召回（避免重复深扫）；`start_integration` 触发现有 `task_create` 启动实际集成任务
+- **项目可定制阈值**：每个项目独立设 `min_stars` / `top_n` / `refresh_interval_days` / `focus_topics`。AI Team OS 默认：stars ≥ 5K，top 200，关注 claude-code / mcp / agent-framework
+- **活跃/全量双视图**：数据**永不删除**。stars 跌出阈值的仓保留（仅 `is_active=False`）；涨回自动激活 + 重新入队 Stage 0
+- **Dashboard `/ecosystem`**：列表带 stage 徽章 + 研究历程 timeline + 候选筛选页 (`/ecosystem/research`) + 项目设置 tab
+- **30+ MCP 工具 / 15+ REST 端点 / SQLite append-only 历史快照**
 
 ---
 

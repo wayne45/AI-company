@@ -21,6 +21,7 @@ import { FailuresPage } from '@/pages/FailuresPage';
 import { PromptsPage } from '@/pages/PromptsPage';
 import { EcosystemListPage } from '@/pages/EcosystemListPage';
 import { EcosystemDetailPage } from '@/pages/EcosystemDetailPage';
+import { EcosystemResearchPage } from '@/pages/EcosystemResearchPage';
 import { useLanguage, LanguageContext } from '@/i18n';
 import { ProjectProvider } from '@/context/ProjectContext';
 
@@ -57,6 +58,7 @@ function AppWithLanguage() {
               <Route path="failures" element={<ErrorBoundary><FailuresPage /></ErrorBoundary>} />
               <Route path="prompts" element={<ErrorBoundary><PromptsPage /></ErrorBoundary>} />
               <Route path="ecosystem" element={<ErrorBoundary><EcosystemListPage /></ErrorBoundary>} />
+              <Route path="ecosystem/research" element={<ErrorBoundary><EcosystemResearchPage /></ErrorBoundary>} />
               <Route path="ecosystem/:repoId" element={<ErrorBoundary><EcosystemDetailPage /></ErrorBoundary>} />
               <Route path="settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />
             </Route>

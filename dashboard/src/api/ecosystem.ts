@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from './client';
 
 // 与后端 /api/ecosystem/profiles 返回格式对齐
@@ -24,6 +24,82 @@ export interface EcosystemRepoProfile {
   is_archived?: boolean;
   scan_run_id?: string | null;
   description_excerpt?: string;
+  // v1.5.0-A 扩展字段（前端 stage 徽章 / failed 提示 / 活跃集 tab 依赖）
+  shallow_summary?: string;
+  last_shallow_refreshed_at?: string | null;
+  is_deleted?: boolean;
+  is_private_now?: boolean;
+  last_fetch_error?: string;
+  fetch_failure_count?: number;
+  is_active?: boolean;
+  active_rank?: number | null;
+}
+
+// v1.5.0 漏斗 stage 状态
+export const ECOSYSTEM_STAGE_STATUSES = [
+  'queued',
+  'shallow_done',
+  'shallow_failed',
+  'architecture_done',
+  'architecture_failed',
+  'debated',
+  'debated_failed',
+  'referenced',
+  'integrated',
+] as const;
+
+export type EcosystemStageStatus = (typeof ECOSYSTEM_STAGE_STATUSES)[number];
+
+/** stage 中文标签 */
+export const STAGE_STATUS_LABELS: Record<EcosystemStageStatus, string> = {
+  queued: '待浅扫',
+  shallow_done: '浅扫完成',
+  shallow_failed: '浅扫失败',
+  architecture_done: '架构已分析',
+  architecture_failed: '架构失败',
+  debated: '已辩论',
+  debated_failed: '辩论失败',
+  referenced: '✓ 参考',
+  integrated: '★ 已集成',
+};
+
+/** stage 颜色（与设计稿 §8.1 对齐：灰/蓝/黄/橙/绿/紫/红） */
+export const STAGE_STATUS_TONE: Record<
+  EcosystemStageStatus,
+  'gray' | 'blue' | 'yellow' | 'orange' | 'green' | 'purple' | 'red'
+> = {
+  queued: 'gray',
+  shallow_done: 'blue',
+  shallow_failed: 'red',
+  architecture_done: 'yellow',
+  architecture_failed: 'red',
+  debated: 'orange',
+  debated_failed: 'red',
+  referenced: 'green',
+  integrated: 'purple',
+};
+
+/** stage 徽章 className（Tailwind 同构色） */
+export function stageBadgeClass(stage: EcosystemStageStatus | string): string {
+  const tone = STAGE_STATUS_TONE[stage as EcosystemStageStatus] ?? 'gray';
+  switch (tone) {
+    case 'gray':
+      return 'bg-muted text-muted-foreground border-border';
+    case 'blue':
+      return 'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30';
+    case 'yellow':
+      return 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30';
+    case 'orange':
+      return 'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/30';
+    case 'green':
+      return 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30';
+    case 'purple':
+      return 'bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30';
+    case 'red':
+      return 'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30';
+    default:
+      return 'bg-muted text-muted-foreground border-border';
+  }
 }
 
 export interface EcosystemFacetCounts {
@@ -49,6 +125,10 @@ export interface EcosystemFilters {
   needsDeepReview?: boolean | null;
   limit?: number;
   facetCounts?: boolean;
+  // v1.5.0-E 新增：活跃/全量/已删除 tab + stage 维度筛选
+  isActive?: boolean | null;
+  isDeleted?: boolean | null;
+  stageStatus?: string; // 多个用逗号分隔
 }
 
 /**
@@ -65,6 +145,9 @@ export function useEcosystemProfiles(filters: EcosystemFilters = {}) {
     needsDeepReview = null,
     limit = 200,
     facetCounts = false,
+    isActive = null,
+    isDeleted = null,
+    stageStatus = '',
   } = filters;
 
   const params = new URLSearchParams();
@@ -76,6 +159,9 @@ export function useEcosystemProfiles(filters: EcosystemFilters = {}) {
   if (needsDeepReview !== null) params.set('needs_deep_review', String(needsDeepReview));
   params.set('limit', String(limit));
   if (facetCounts) params.set('facet_counts', 'true');
+  if (isActive !== null) params.set('is_active', String(isActive));
+  if (isDeleted !== null) params.set('is_deleted', String(isDeleted));
+  if (stageStatus) params.set('stage_status', stageStatus);
 
   return useQuery({
     queryKey: ['ecosystem', 'profiles', filters],
@@ -131,6 +217,15 @@ export interface EcosystemDeepReview {
   integration_recommendation: string | null; // adopt / experiment / hold / avoid
   report_id: string | null;
   created_at: string;
+  // v1.5.0-A 字段（前端 timeline 依赖）
+  stage_status?: EcosystemStageStatus | string;
+  integration_md?: string;
+  shallow_completed_at?: string | null;
+  architecture_completed_at?: string | null;
+  debated_at?: string | null;
+  stage3_completed_at?: string | null;
+  debate_meeting_id?: string | null;
+  integration_task_id?: string | null;
 }
 
 /** 仓与仓的关联关系 */
@@ -152,7 +247,7 @@ export interface EcosystemScanRun {
   agent_id: string | null;
   scan_type: string;
   started_at: string;
-  finished_at: string | null;
+  completed_at: string | null;
   status: string;
   repos_added: number;
   repos_updated: number;
@@ -302,3 +397,127 @@ export const CATEGORY_LABELS: Record<string, string> = {
   'skill-system': '技能系统',
   tooling: '开发工具',
 };
+
+// ============================================================
+// v1.5.0-E: Project Settings (决策 12.1)
+// ============================================================
+
+/** 项目级 ecosystem 配置 — 与后端 EcosystemProjectSettings 对齐 */
+export interface EcosystemProjectSettings {
+  project_id: string;
+  min_stars: number;
+  top_n: number;
+  refresh_interval_days: number;
+  auto_shallow_on_archive: boolean;
+  focus_topics: string[];
+  focus_languages: string[];
+  shallow_concurrency: number;
+  deep_concurrency: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** 用 PUT 提交时的入参（不带 timestamps） */
+export type EcosystemProjectSettingsInput = Omit<
+  EcosystemProjectSettings,
+  'project_id' | 'created_at' | 'updated_at'
+>;
+
+/** GET /api/ecosystem/projects/{project_id}/settings */
+export function useEcosystemProjectSettings(projectId: string | null) {
+  return useQuery({
+    queryKey: ['ecosystem', 'project-settings', projectId],
+    queryFn: () =>
+      apiFetch<EcosystemProjectSettings>(
+        `/api/ecosystem/projects/${projectId}/settings`,
+      ),
+    enabled: !!projectId,
+  });
+}
+
+/** PUT /api/ecosystem/projects/{project_id}/settings */
+export function useUpdateProjectSettings(projectId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: EcosystemProjectSettingsInput) => {
+      if (!projectId) throw new Error('projectId required');
+      return await apiFetch<EcosystemProjectSettings>(
+        `/api/ecosystem/projects/${projectId}/settings`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        },
+      );
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ecosystem', 'project-settings', projectId] });
+    },
+  });
+}
+
+// ============================================================
+// v1.5.0-E: Failed repo retry
+// ============================================================
+
+/** POST /api/ecosystem/profiles/{repo_id}/retry — 立即重试失败的仓 */
+export function useRetryFailedRepo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (repoId: string) =>
+      apiFetch<{ success: boolean; repo_full_name: string; next_action: string }>(
+        `/api/ecosystem/profiles/${repoId}/retry`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'manual_retry' }),
+        },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ecosystem', 'profiles'] });
+      qc.invalidateQueries({ queryKey: ['ecosystem', 'repo-full'] });
+    },
+  });
+}
+
+// ============================================================
+// v1.5.0-E: Lifecycle batch dispatch (deep_review_request_batch)
+// ============================================================
+
+export interface LifecycleBatchIntent {
+  repo_id: string;
+  repo_full_name: string;
+  deep_review_id: string;
+  prompt: string;
+  timeout_seconds: number;
+  project_id: string | null;
+}
+
+export interface LifecycleBatchResponse {
+  success: boolean;
+  dispatched: number;
+  intents: LifecycleBatchIntent[];
+}
+
+export interface LifecycleBatchInput {
+  tags: string[];
+  min_stars?: number | null;
+  limit?: number;
+  research_goal?: string;
+}
+
+export function useLifecycleRequestBatch() {
+  return useMutation({
+    mutationFn: async (input: LifecycleBatchInput) =>
+      apiFetch<LifecycleBatchResponse>(`/api/ecosystem/lifecycle/request_batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tags: input.tags,
+          min_stars: input.min_stars ?? null,
+          limit: input.limit ?? 20,
+          research_goal: input.research_goal ?? '',
+        }),
+      }),
+  });
+}

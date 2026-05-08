@@ -1,13 +1,31 @@
 import { Link } from 'react-router-dom';
-import { Star, GitBranch, Calendar, Tag, AlertCircle, Archive } from 'lucide-react';
+import { useState } from 'react';
+import {
+  Star,
+  GitBranch,
+  Calendar,
+  Tag,
+  AlertCircle,
+  Archive,
+  RefreshCcw,
+  AlertTriangle,
+} from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import type { EcosystemRepoProfile } from '@/api/ecosystem';
-import { CATEGORY_LABELS } from '@/api/ecosystem';
+import {
+  CATEGORY_LABELS,
+  STAGE_STATUS_LABELS,
+  stageBadgeClass,
+  useRetryFailedRepo,
+} from '@/api/ecosystem';
 
 interface RepoCardProps {
   /** 仓档案数据 */
   repo: EcosystemRepoProfile;
+  /** 显式 stage（缺省时根据 profile 字段推断） */
+  stage?: string;
 }
 
 /**
@@ -50,12 +68,55 @@ function categoryColor(category: string | null): string {
 }
 
 /**
- * 单仓卡片 — 列表视图的基本单元。点击跳详情页。
+ * 根据 profile 字段推断 stage（不查 deep_reviews 时的兜底）。
+ * - is_deleted/is_private_now → shallow_failed (红)
+ * - fetch_failure_count >= 3 → shallow_failed (红)
+ * - shallow_summary 非空 → shallow_done (蓝)
+ * - 其他 → queued (灰)
  */
-export function RepoCard({ repo }: RepoCardProps) {
+function inferStage(repo: EcosystemRepoProfile): string {
+  if (repo.is_deleted || repo.is_private_now) return 'shallow_failed';
+  if ((repo.fetch_failure_count ?? 0) >= 3) return 'shallow_failed';
+  if (repo.shallow_summary && repo.shallow_summary.trim().length > 0)
+    return 'shallow_done';
+  return 'queued';
+}
+
+/**
+ * 单仓卡片 — 列表视图的基本单元。点击跳详情页。
+ * v1.5.0-E: 加 stage 徽章 + failed 红色高亮 + 立即重试按钮。
+ */
+export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
   const lastCommitDays = daysSince(repo.last_commit_at);
   const isStale = lastCommitDays !== null && lastCommitDays > 180;
-  const summary = repo.one_line_summary || repo.description_excerpt || repo.description || '暂无描述';
+  const summary =
+    repo.shallow_summary || repo.one_line_summary || repo.description_excerpt || repo.description || '暂无描述';
+
+  const stage = stageProp ?? inferStage(repo);
+  const isFailed = stage.endsWith('_failed') || (repo.fetch_failure_count ?? 0) >= 3;
+  const isDeleted = !!repo.is_deleted;
+  const isPrivate = !!repo.is_private_now;
+
+  const retry = useRetryFailedRepo();
+  const [retryDone, setRetryDone] = useState(false);
+
+  const onRetry = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (retry.isPending) return;
+    retry.mutate(repo.id, {
+      onSuccess: () => {
+        setRetryDone(true);
+        // 2 秒后清除成功提示
+        setTimeout(() => setRetryDone(false), 2000);
+      },
+    });
+  };
+
+  // failed 卡片用红色边框 + 浅色底
+  const cardBorder = isFailed
+    ? 'border-rose-300/60 bg-rose-50/40 dark:border-rose-700/40 dark:bg-rose-950/20 hover:border-rose-400'
+    : 'hover:border-primary/50 hover:bg-accent/30';
 
   return (
     <Link
@@ -63,7 +124,7 @@ export function RepoCard({ repo }: RepoCardProps) {
       className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg"
       aria-label={`查看 ${repo.repo_full_name} 详情`}
     >
-      <Card className="h-full transition-colors hover:border-primary/50 hover:bg-accent/30">
+      <Card className={`h-full transition-colors ${cardBorder}`}>
         <CardContent className="p-4 space-y-2.5">
           {/* 头部：仓名 + star */}
           <div className="flex items-start justify-between gap-2">
@@ -81,12 +142,65 @@ export function RepoCard({ repo }: RepoCardProps) {
             </div>
           </div>
 
-          {/* 一句话摘要 */}
+          {/* Stage 徽章条 */}
+          <div className="flex flex-wrap items-center gap-1">
+            <span
+              className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium ${stageBadgeClass(stage)}`}
+              title={`stage: ${stage}`}
+            >
+              {STAGE_STATUS_LABELS[stage as keyof typeof STAGE_STATUS_LABELS] ?? stage}
+            </span>
+            {isDeleted && (
+              <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
+                <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                已删除
+              </span>
+            )}
+            {isPrivate && (
+              <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
+                <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                被设私有
+              </span>
+            )}
+          </div>
+
+          {/* 一句话摘要（优先 shallow_summary） */}
           <p className="text-xs text-muted-foreground line-clamp-2 min-h-[2rem]">
             {summary}
           </p>
 
-          {/* 标签条：category + topics + 状态 */}
+          {/* 失败错误提示 + 重试按钮 */}
+          {isFailed && (
+            <div className="rounded border border-rose-300/40 bg-rose-100/50 dark:bg-rose-950/30 px-2 py-1.5">
+              <div className="flex items-start gap-1.5">
+                <AlertTriangle className="h-3 w-3 text-rose-600 mt-0.5 shrink-0" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <p
+                    className="text-[10px] text-rose-700 dark:text-rose-300 line-clamp-2"
+                    title={repo.last_fetch_error || ''}
+                  >
+                    {repo.last_fetch_error || '抓取失败（次数 ≥ 3）'}
+                  </p>
+                  <p className="text-[10px] text-rose-600/70 mt-0.5">
+                    失败次数 {repo.fetch_failure_count ?? 0}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  className="shrink-0 border-rose-300 text-rose-700 hover:bg-rose-100 dark:border-rose-700/40 dark:text-rose-300"
+                  onClick={onRetry}
+                  disabled={retry.isPending || retryDone}
+                  aria-label="立即重试"
+                >
+                  <RefreshCcw className={`h-3 w-3 ${retry.isPending ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  {retryDone ? '已入队' : '重试'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* 标签条：category + topics */}
           <div className="flex flex-wrap items-center gap-1">
             {repo.relevance_category && (
               <span
@@ -128,7 +242,7 @@ export function RepoCard({ repo }: RepoCardProps) {
                 沉寂
               </span>
             )}
-            {repo.needs_deep_review && (
+            {repo.needs_deep_review && !isFailed && (
               <span className="ml-auto flex items-center gap-1 text-blue-600 dark:text-blue-400">
                 <AlertCircle className="h-3 w-3" aria-hidden="true" />
                 待深扫

@@ -3,6 +3,98 @@
 AI Team OS 的所有重要变更均记录在此文件中。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)
 
+## [1.5.0] — 2026-05-08
+
+### 新增 — 生态研究平台 v2：渐进式深扫漏斗
+
+把 v1.4.0 的"一次性 5 段深扫"重构为 **4 阶段渐进式知识库漏斗**，让生态仓研究产物**累加而非一次性产出**。基于用户敲定语义实施，避免低价值仓浪费 token，并支持研究产物跨周期复用召回。
+
+- **Stage 0 — 入档即浅扫（Stage A/B）**
+  - 新建 `EcosystemShallowQueueWorker`（552 行），自动派 `ai-engineer` agent（5 并发）总结新入档仓
+  - 浅扫内容：核心功能 / 定位 / 优势 / 适用场景（200-400 字）
+  - Worker 每 5 分钟跑一次，返回 `DispatchIntent[]`（不直接 spawn agent — Leader 用 Agent 工具 + `team_name=ecosystem-platform` 实际派遣）
+  - **8 类失败分类处理**：404→mark_deleted / 403_私密→mark_private / rate_limit→backoff+重试 / 5xx→指数退避重试 / agent_read→重试+换 agent / agent_timeout / json_parse→带示例重试 / fetch_style→pattern_record
+  - **失败自学习机制**：同类 `fetch_style` 失败 ≥ 3 个不同仓 → 自动 `pattern_record(type='failure')`，未来 agent 通过 `pattern_search` 读到 lessons 优化策略
+
+- **Stage 1 — 按需架构分析（Stage C）**
+  - 新增 `ecosystem_deep_review_request_batch(tags, min_stars, limit)` MCP 工具
+  - 用户挑研究方向（如 "memory_system"）→ 批量派 `backend-architect` 读架构关键文件
+  - 输出：`architecture_md` 字段 + `stage_status='architecture_done'`
+
+- **Stage 2 — 多角度辩论（Stage C）**
+  - 新增 `ecosystem_trigger_debate(repo_ids, research_goal)` 直接调现有 `debate_start`（**不内建辩论引擎**，复用会议系统）
+  - Leader 完全掌控辩论参与者和轮次（保留现有会议系统能力）
+  - **会议→生态库反向写入 hook**（`meeting_ecosystem_writeback.py`）：会议结束 + topic 含生态关键词时，hook 提醒 Leader 派 agent 调 `ecosystem_apply_debate_result(risks_md / learnings_md / integration_md / integration_recommendation)`
+  - 输出：每个 finalist 4 字段 + `stage_status='debated'`
+
+- **Stage 3 — 参考 / 集成标记（Stage C）**
+  - `ecosystem_mark_as_reference` 加 `lifecycle:reference` tag + `stage_status='referenced'`
+  - `ecosystem_start_integration` 加 `lifecycle:integrated` tag + 通过 `task_create` 创建真实集成任务（**不内建实施引擎**，复用任务系统）
+  - 两路径都保留研究产物便于未来快速召回（避免重复深扫）
+
+### 新增 — 项目可定制阈值（Stage A）
+
+- 新建 `EcosystemProjectSettings` 表（每项目独立）：`min_stars` / `top_n` / `refresh_interval_days` / `focus_topics` / `focus_languages` / `shallow_concurrency` / `deep_concurrency`
+- AI Team OS 默认：`min_stars=5000, top_n=200, focus_topics=['claude-code','mcp','agent-framework']`
+- 其他项目默认：`min_stars=1000, top_n=100`
+
+### 新增 — 活跃/全量双视图 + 数据 append-only（Stage A/D）
+
+- **决策 D**：数据**永不删除** — stars 跌出阈值的仓不删，仅 `is_active=False`；stars 涨回 → 自动激活 + 重新入队 Stage 0
+- **决策 E**：周期浅扫**只扫活跃集**（top_n by stars），节省 GitHub API 配额
+- 新建 `EcosystemRepoStatusSnapshot` 表，每次 scan 记录 stars/pushed_at/is_archived/is_active 供历史分析
+- 新建 `EcosystemRefresher` service（480 行）：`shallow_refresh()`（diff 跳过 last_pushed_at 未变的仓）+ `recompute_active_set()` + `resurrect()`（删库/私密复活）
+
+### 新增 — 前端漏斗 UI（Stage E）
+
+- 列表页：stage 颜色徽章（queued/shallow_done/architecture_done/debated/referenced/integrated/_failed）+ 3 tab（活跃/全量/已删除）
+- 详情页：新增"研究历程"timeline tab，显示 stage 推进 + agent 输出 + `shallow_summary_history` 历史快照
+- 新页面 `/ecosystem/research` 候选筛选：输入研究目标 → tags 候选列表 + 浅扫 summary 预览 → 多选触发 Stage 1 → finalists 触发 Stage 2
+- 项目详情页加 "Ecosystem 设置" tab，8 字段（min_stars / top_n / refresh_interval_days / focus_topics / focus_languages / shallow_concurrency / deep_concurrency / auto_shallow_on_archive）
+- 失败仓：红色徽章 + "立即重试"按钮（调 `POST /api/ecosystem/profiles/{id}/retry`）
+
+### 新增 — 11 个新 MCP 工具
+
+- Stage 0: `ecosystem_apply_shallow_summary`, `ecosystem_shallow_queue_status`
+- Stage 1: `ecosystem_deep_review_request_batch`, `ecosystem_apply_architecture_md`
+- Stage 2: `ecosystem_trigger_debate`, `ecosystem_link_debate_meeting`, `ecosystem_apply_debate_result`
+- Stage 3: `ecosystem_mark_as_reference`, `ecosystem_start_integration`, `ecosystem_link_integration_task`
+- Refresh: (扩展 `ecosystem_scan_periodic` 加 refresh 策略)
+
+### 新增 — 8 个新 REST 端点
+
+- `/api/ecosystem/lifecycle/*`（Stage 1/2/3 触发链路）
+- `/api/ecosystem/profiles/{id}/retry`（失败仓手动重试）
+- `GET/PUT /api/ecosystem/projects/{project_id}/settings`
+- `POST /api/ecosystem/shallow_queue/{apply_summary,tick}`, `GET /api/ecosystem/shallow_queue/status`
+
+### Schema 变更（Stage A — 通过 COLUMNS_TO_ENSURE 完全向后兼容）
+
+- `EcosystemDeepReview` +8 字段：`stage_status` enum / `integration_md` / 4 个 stage 时间戳 / `debate_meeting_id` / `integration_task_id`
+- `EcosystemRepoProfile` +8 字段：`shallow_summary` / `last_shallow_refreshed_at` / `is_deleted` / `is_private_now` / `last_fetch_error` / `fetch_failure_count` / `is_active` / `active_rank`
+- 2 张新表：`EcosystemRepoStatusSnapshot`（append-only 历史）/ `EcosystemProjectSettings`（每项目配置）
+- 标签字典：26 → 31（新增 5 个 lifecycle 标签：`evaluating` / `reference` / `integrated` / `deleted` / `private_now`）
+- Tag source enum +1：`lifecycle`（Stage 3 转换自动管理）
+
+### 测试
+
+- 1283+ 单元测试通过（1264 baseline + 110+ 新 ecosystem 测试覆盖 A/B/C/D/E）
+- 0 回归
+- 6 pre-existing failures（CLI version flag / debate template / mcp_autostart / pipeline）经 `git stash` 验证与本次无关
+
+### 架构决策（用户敲定）
+
+- **(A)** Ecosystem 是**知识库不是工作流引擎** — Stage 2 复用 `debate_start`，Stage 3 复用 `task_create`。Ecosystem 只做记录、召回、标注。
+- **(B)** 会议→生态库反向写入 hook 提醒 Leader 把辩论结论回写生态库（保留 Leader 决策权）
+- **(C)** 每个项目独立阈值 + 活跃/全量双视图
+- **(D)** 数据 append-only 永不删除；星标跌出的仓保留以备未来复活
+- **(E)** 周期浅扫只扫活跃集
+- **(F)** Rate limit 测试驱动并发调优（不预设，实测调整）
+
+### 备注
+
+- 本版本**仅发布到 GitHub**（延续 v1.4.0 开发里程碑模式），PyPI 发布留待后续稳定性验证
+
 ## [1.4.0] — 2026-05-07
 
 ### 新增 — 生态研究平台（Stage A-J）

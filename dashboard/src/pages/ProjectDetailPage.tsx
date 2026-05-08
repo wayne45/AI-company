@@ -30,6 +30,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { EcosystemSettingsPanel } from '@/components/ecosystem/EcosystemSettingsPanel';
 import {
   ArrowLeft,
   Plus,
@@ -898,41 +900,55 @@ export function ProjectDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Leader Status */}
-      <LeaderCard agents={allAgents} />
+      {/* Tabs: 团队总览 / Ecosystem 设置 */}
+      <Tabs defaultValue="teams">
+        <TabsList variant="line" className="gap-3">
+          <TabsTrigger value="teams">团队总览</TabsTrigger>
+          <TabsTrigger value="ecosystem">Ecosystem 设置</TabsTrigger>
+        </TabsList>
 
-      {/* Active Teams */}
-      {activeTeams.length > 0 ? (
-        <div className="space-y-4">
-          {activeTeams.map((team) => (
-            <ActiveTeamContent key={team.id} team={team} />
-          ))}
-        </div>
-      ) : (
-        <Card>
-          <CardContent className="py-8 text-center">
-            <Users className="mx-auto h-8 w-8 text-muted-foreground/50 mb-3" />
-            <p className="text-sm text-muted-foreground">
-              {t.projectDetail.noActiveTeams}
-            </p>
-          </CardContent>
-        </Card>
-      )}
+        <TabsContent value="teams" className="mt-4 space-y-6">
+          {/* Leader Status */}
+          <LeaderCard agents={allAgents} />
 
-      {/* Completed Teams */}
-      {completedTeams.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <History className="h-4 w-4" />
-            <h3 className="text-sm font-medium">{t.projectDetail.historyTeamsTitle(completedTeams.length)}</h3>
-          </div>
-          <div className="space-y-2">
-            {completedTeams.map((team) => (
-              <CompletedTeamRow key={team.id} team={team} />
-            ))}
-          </div>
-        </div>
-      )}
+          {/* Active Teams */}
+          {activeTeams.length > 0 ? (
+            <div className="space-y-4">
+              {activeTeams.map((team) => (
+                <ActiveTeamContent key={team.id} team={team} />
+              ))}
+            </div>
+          ) : (
+            <Card>
+              <CardContent className="py-8 text-center">
+                <Users className="mx-auto h-8 w-8 text-muted-foreground/50 mb-3" />
+                <p className="text-sm text-muted-foreground">
+                  {t.projectDetail.noActiveTeams}
+                </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Completed Teams */}
+          {completedTeams.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <History className="h-4 w-4" />
+                <h3 className="text-sm font-medium">{t.projectDetail.historyTeamsTitle(completedTeams.length)}</h3>
+              </div>
+              <div className="space-y-2">
+                {completedTeams.map((team) => (
+                  <CompletedTeamRow key={team.id} team={team} />
+                ))}
+              </div>
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="ecosystem" className="mt-4">
+          {projectId && <EcosystemSettingsPanel projectId={projectId} />}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

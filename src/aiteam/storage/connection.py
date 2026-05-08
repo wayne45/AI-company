@@ -116,6 +116,24 @@ COLUMNS_TO_ENSURE: list[tuple[str, str, str]] = [
     ("ecosystem_scan_runs", "project_id", "VARCHAR(36)"),
     # K5: split dispatch prompt out of demo_log_excerpt
     ("ecosystem_deep_reviews", "dispatch_prompt", "TEXT DEFAULT ''"),
+    # v1.5.0-A: EcosystemDeepReview 渐进式漏斗 stage 状态 + 关联会议/集成任务
+    ("ecosystem_deep_reviews", "stage_status", "VARCHAR(30) DEFAULT 'queued'"),
+    ("ecosystem_deep_reviews", "integration_md", "TEXT DEFAULT ''"),
+    ("ecosystem_deep_reviews", "shallow_completed_at", "DATETIME"),
+    ("ecosystem_deep_reviews", "architecture_completed_at", "DATETIME"),
+    ("ecosystem_deep_reviews", "debated_at", "DATETIME"),
+    ("ecosystem_deep_reviews", "stage3_completed_at", "DATETIME"),
+    ("ecosystem_deep_reviews", "debate_meeting_id", "VARCHAR(36)"),
+    ("ecosystem_deep_reviews", "integration_task_id", "VARCHAR(36)"),
+    # v1.5.0-A: EcosystemRepoProfile 浅扫 + 失败追踪 + 活跃集
+    ("ecosystem_repo_profiles", "shallow_summary", "TEXT DEFAULT ''"),
+    ("ecosystem_repo_profiles", "last_shallow_refreshed_at", "DATETIME"),
+    ("ecosystem_repo_profiles", "is_deleted", "BOOLEAN DEFAULT 0"),
+    ("ecosystem_repo_profiles", "is_private_now", "BOOLEAN DEFAULT 0"),
+    ("ecosystem_repo_profiles", "last_fetch_error", "TEXT DEFAULT ''"),
+    ("ecosystem_repo_profiles", "fetch_failure_count", "INTEGER DEFAULT 0"),
+    ("ecosystem_repo_profiles", "is_active", "BOOLEAN DEFAULT 1"),
+    ("ecosystem_repo_profiles", "active_rank", "INTEGER"),
 ]
 
 
@@ -147,6 +165,39 @@ INDEXES_TO_ENSURE: list[tuple[str, str, str]] = [
         "ix_ecosystem_profiles_project_archived_stars",
         "ecosystem_repo_profiles",
         "project_id, is_archived, stars",
+    ),
+    # v1.5.0-A perf — active set hot path (filter is_active + sort by stars)
+    (
+        "ix_ecosystem_profiles_project_active_stars",
+        "ecosystem_repo_profiles",
+        "project_id, is_active, stars",
+    ),
+    (
+        "ix_ecosystem_profiles_project_deleted_private",
+        "ecosystem_repo_profiles",
+        "project_id, is_deleted, is_private_now",
+    ),
+    # v1.5.0-A: status snapshot table indexes
+    (
+        "ix_eco_status_snap_repo_time",
+        "ecosystem_repo_status_snapshots",
+        "repo_id, snapshot_at",
+    ),
+    (
+        "ix_eco_status_snap_scan_run",
+        "ecosystem_repo_status_snapshots",
+        "scan_run_id",
+    ),
+    (
+        "ix_eco_status_snap_project_repo",
+        "ecosystem_repo_status_snapshots",
+        "project_id, repo_id",
+    ),
+    # v1.5.0-A: deep_review stage_status filter
+    (
+        "ix_ecosystem_deep_reviews_stage_status",
+        "ecosystem_deep_reviews",
+        "stage_status",
     ),
 ]
 

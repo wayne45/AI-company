@@ -51,7 +51,7 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
       filters.topic ||
       filters.category ||
       (filters.minStars && filters.minStars > 0) ||
-      filters.needsDeepReview !== null,
+      filters.stageStatus,
   );
 
   // 类别 trigger 显示文本
@@ -63,13 +63,15 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
   const minStarsValue = filters.minStars ?? 0;
   const starLabel = STAR_OPTIONS.find((o) => o.value === minStarsValue)?.label ?? '不限星标';
 
-  // 深扫 trigger 显示文本
-  const reviewLabel =
-    filters.needsDeepReview === null || filters.needsDeepReview === undefined
-      ? '全部深扫状态'
-      : filters.needsDeepReview
-        ? '待深扫'
-        : '已分析';
+  // 研究阶段 trigger 显示文本（v1.5.0 漏斗 3 类互斥，对齐 StatsBar 数字）
+  const STAGE_LABELS: Record<string, string> = {
+    queued: '待浅扫',
+    shallow_done: '已浅扫',
+    'architecture_done,debated,referenced,integrated': '已深扫',
+  };
+  const stageLabel = filters.stageStatus
+    ? (STAGE_LABELS[filters.stageStatus] ?? filters.stageStatus)
+    : '全部研究阶段';
 
   return (
     <div className="flex flex-col gap-3 p-4 border-b bg-muted/20">
@@ -147,28 +149,23 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
           </SelectContent>
         </Select>
 
-        {/* 深扫状态 */}
+        {/* 研究阶段（v1.5.0 漏斗 4 类）*/}
         <Select
-          value={
-            filters.needsDeepReview === null || filters.needsDeepReview === undefined
-              ? ALL
-              : filters.needsDeepReview
-                ? 'yes'
-                : 'no'
-          }
+          value={filters.stageStatus || ALL}
           onValueChange={(v) =>
             update({
-              needsDeepReview: v === ALL ? null : v === 'yes',
+              stageStatus: !v || v === ALL ? '' : v,
             })
           }
         >
-          <SelectTrigger className="h-8 min-w-[140px] text-sm" aria-label="深扫状态">
-            <span className="truncate">{reviewLabel}</span>
+          <SelectTrigger className="h-8 min-w-[160px] text-sm" aria-label="研究阶段">
+            <span className="truncate">{stageLabel}</span>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL}>全部深扫状态</SelectItem>
-            <SelectItem value="yes">待深扫</SelectItem>
-            <SelectItem value="no">已分析</SelectItem>
+            <SelectItem value={ALL}>全部研究阶段</SelectItem>
+            <SelectItem value="queued">待浅扫</SelectItem>
+            <SelectItem value="shallow_done">已浅扫</SelectItem>
+            <SelectItem value="architecture_done,debated,referenced,integrated">已深扫</SelectItem>
           </SelectContent>
         </Select>
 

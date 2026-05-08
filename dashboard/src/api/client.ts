@@ -24,7 +24,12 @@ export function getCurrentProjectId(): string | null {
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const projectHeaders: Record<string, string> = {};
-  if (currentProjectPath) projectHeaders['X-Project-Dir'] = currentProjectPath;
+  // HTTP headers must be ISO-8859-1 (RFC 7230). CJK paths (e.g. "C:/Users/TUF/Desktop/AI团队框架")
+  // would crash fetch with "non ISO-8859-1 code point". X-Project-Id (UUID) is always ASCII-safe
+  // and sufficient for project isolation; X-Project-Dir is a cwd-fallback for MCP/Hook tools.
+  if (currentProjectPath && /^[\x00-\x7F]*$/.test(currentProjectPath)) {
+    projectHeaders['X-Project-Dir'] = currentProjectPath;
+  }
   if (currentProjectId) projectHeaders['X-Project-Id'] = currentProjectId;
 
   const res = await fetch(`${API_BASE}${path}`, {
