@@ -75,7 +75,13 @@ export function EcosystemStatsBar({
 
   const stats = useMemo(() => {
     const totalCount = total ?? allProfiles.length;
-    const needsDeepCount = allProfiles.filter((p) => p.needs_deep_review).length;
+    // v1.5.1：待浅扫总数用后端 facet 全量值（不被 limit=200 截断）；
+    // facet 不可用时退回到列表估算（标记为下界）。
+    const stageFacet = facetCounts?.stage ?? {};
+    const needsDeepCount =
+      facetCounts?.stage !== undefined
+        ? stageFacet.queued ?? 0
+        : allProfiles.filter((p) => (p.stage_status ?? 'queued') === 'queued').length;
     // 失活：archived 或 last_commit_at 超过 365 天
     const now = Date.now();
     const archivedCount = allProfiles.filter((p) => {
@@ -84,8 +90,15 @@ export function EcosystemStatsBar({
       const days = (now - new Date(p.last_commit_at).getTime()) / (1000 * 60 * 60 * 24);
       return days > 365;
     }).length;
-    return { totalCount, needsDeepCount, archivedCount };
-  }, [allProfiles, total]);
+    // 已深扫总数 = stage 进入 architecture_done+ 的全量
+    const deepDoneCount =
+      (stageFacet.architecture_done ?? 0) +
+      (stageFacet.debated ?? 0) +
+      (stageFacet.referenced ?? 0) +
+      (stageFacet.integrated ?? 0);
+    const isFacetAvailable = facetCounts?.stage !== undefined;
+    return { totalCount, needsDeepCount, archivedCount, deepDoneCount, isFacetAvailable };
+  }, [allProfiles, facetCounts, total]);
 
   // Top 3 类别（按命中数量降序）
   const topCategories = useMemo(() => {
@@ -128,7 +141,7 @@ export function EcosystemStatsBar({
         )}
       </div>
 
-      {/* 数值卡片排（研究产物次数显示在 RepoCard stage 徽章，不重复在 stats）*/}
+      {/* 数值卡片排（v1.5.1：用 facet stage 全量统计，不被 limit 截断）*/}
       <div className="flex flex-wrap gap-2">
         <StatCard
           Icon={Boxes}
@@ -141,8 +154,15 @@ export function EcosystemStatsBar({
           Icon={FileSearch}
           label="待浅扫"
           value={stats.needsDeepCount}
-          hint="尚未派 agent 浅扫总结"
+          hint="浅扫=读 README/CHANGELOG/release 摘要功能与设计方向（自动批量）"
           tone="info"
+        />
+        <StatCard
+          Icon={FileSearch}
+          label="已被研究"
+          value={stats.deepDoneCount}
+          hint="该仓被纳入过系统改动调研（卡片/详情可看研究次数与历程）"
+          tone="primary"
         />
         <StatCard
           Icon={Archive}

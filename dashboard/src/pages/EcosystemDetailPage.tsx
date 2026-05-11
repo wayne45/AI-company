@@ -33,11 +33,10 @@ import {
 import { CapabilityTags } from '@/components/ecosystem/CapabilityTags';
 import { DeepReviewSection } from '@/components/ecosystem/DeepReviewSection';
 import { RelationsSection } from '@/components/ecosystem/RelationsSection';
-import { ScanRunSection } from '@/components/ecosystem/ScanRunSection';
 import { ResearchTimeline } from '@/components/ecosystem/ResearchTimeline';
 
 /**
- * 单仓详情页 — 展示完整档案、元数据、深扫摘要 + 研究历程 timeline (v1.5.0-E)。
+ * 单仓详情页 — 展示完整档案、元数据、评审记录 + 研究历程 timeline (v1.5.0-E)。
  * 路径：/ecosystem/:repoId
  */
 export function EcosystemDetailPage() {
@@ -106,7 +105,7 @@ export function EcosystemDetailPage() {
     repo.description ||
     '暂无描述';
 
-  // 提取最新一条深扫记录的状态 + 集成建议
+  // 提取最新一条评审记录的状态 + 集成建议
   const latestReview =
     full?.deep_reviews && full.deep_reviews.length > 0
       ? [...full.deep_reviews].sort(
@@ -195,8 +194,13 @@ export function EcosystemDetailPage() {
                     <Badge
                       variant="outline"
                       className={`text-xs ${reviewStatusStyle[latestReview.status] ?? ''}`}
+                      title="评审当前 stage 进度"
                     >
-                      深扫:{DEEP_REVIEW_STATUS_LABELS[latestReview.status] ?? latestReview.status}
+                      {/* v1.5.2: 用 stage_status 而非 status，避免"浅扫 done 显示深扫已完成"的歧义 */}
+                      评审:
+                      {STAGE_STATUS_LABELS[latestReview.stage_status as keyof typeof STAGE_STATUS_LABELS] ??
+                        DEEP_REVIEW_STATUS_LABELS[latestReview.status] ??
+                        latestReview.status}
                     </Badge>
                   )}
                   {latestReview?.integration_recommendation && (
@@ -328,7 +332,12 @@ export function EcosystemDetailPage() {
                   )}
                   <MetaRow
                     label="最后扫描"
-                    value={formatDate(repo.last_scanned_at)}
+                    value={formatDate(
+                      // 取该仓任意一次扫描动作的最新时间（浅扫 / 批次入档）
+                      [repo.last_shallow_refreshed_at, repo.last_scanned_at]
+                        .filter((v): v is string => Boolean(v))
+                        .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] ?? null,
+                    )}
                     icon={<Calendar className="h-3.5 w-3.5" />}
                   />
                   <MetaRow
@@ -336,13 +345,6 @@ export function EcosystemDetailPage() {
                     value={formatDate(repo.first_seen_at)}
                     icon={<Calendar className="h-3.5 w-3.5" />}
                   />
-                  {repo.last_shallow_refreshed_at && (
-                    <MetaRow
-                      label="最近浅扫"
-                      value={formatDate(repo.last_shallow_refreshed_at)}
-                      icon={<Calendar className="h-3.5 w-3.5" />}
-                    />
-                  )}
                 </CardContent>
               </Card>
             </div>
@@ -412,11 +414,8 @@ export function EcosystemDetailPage() {
                 </Card>
               ) : (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <CapabilityTags tags={full.tags} />
-                    <ScanRunSection scanRun={full.scan_run} />
-                  </div>
-                  <DeepReviewSection reviews={full.deep_reviews} />
+                  <CapabilityTags tags={full.tags} />
+                  <DeepReviewSection reviews={full.deep_reviews} shallowSummary={repo.shallow_summary} />
                   <RelationsSection
                     outgoing={full.relations_from}
                     incoming={full.relations_to}

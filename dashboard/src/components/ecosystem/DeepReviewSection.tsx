@@ -21,12 +21,32 @@ import { Button } from '@/components/ui/button';
 import {
   DEEP_REVIEW_STATUS_LABELS,
   INTEGRATION_RECOMMENDATION_LABELS,
+  STAGE_STATUS_LABELS,
+  stageBadgeClass,
 } from '@/api/ecosystem';
 import type { EcosystemDeepReview } from '@/api/ecosystem';
 import { useReportDetail } from '@/api/reports';
 
 interface DeepReviewSectionProps {
   reviews: EcosystemDeepReview[];
+  /** 浅扫摘要（profile 级，用于 stage=shallow_done 时显示，避免一堆"暂无数据"） */
+  shallowSummary?: string | null;
+}
+
+/**
+ * v1.5.2 fix: 后端某些 datetime 字段无 +00:00（如 completed_at），
+ * 直接 new Date(...) 会按浏览器本地时区解析，与 started_at 的 UTC 形成时差。
+ * 此函数显式按 UTC 解析裸字符串。
+ */
+function parseAsUtc(s: string | null | undefined): number {
+  if (!s) return NaN;
+  // 已含时区或 Z 后缀，原样解析
+  if (/[zZ]|[+-]\d{2}:\d{2}$/.test(s)) {
+    return new Date(s).getTime();
+  }
+  // 裸字符串：把 "2026-05-08 09:20:23.268270" 当作 UTC
+  const normalized = s.replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1') + 'Z';
+  return new Date(normalized).getTime();
 }
 
 /** 状态徽章 */
@@ -91,7 +111,7 @@ function MarkdownBlock({
       </h4>
       <div className="md-prose text-sm max-w-none pl-5">
         {isEmpty ? (
-          <p className="text-xs text-muted-foreground italic">暂无数据 — 后续深扫批次将填充</p>
+          <p className="text-xs text-muted-foreground italic">暂无数据 — 该字段将在对应 stage 完成后填充</p>
         ) : (
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
         )}
@@ -100,8 +120,14 @@ function MarkdownBlock({
   );
 }
 
-/** 单条深扫记录卡片 */
-function ReviewCard({ review }: { review: EcosystemDeepReview }) {
+/** 单条评审记录卡片（含浅扫 / 架构深扫 / 辩论 / 集成等多 stage） */
+function ReviewCard({
+  review,
+  shallowSummary,
+}: {
+  review: EcosystemDeepReview;
+  shallowSummary?: string | null;
+}) {
   const [expanded, setExpanded] = useState(true);
   const [showFullReport, setShowFullReport] = useState(false);
 
@@ -110,9 +136,9 @@ function ReviewCard({ review }: { review: EcosystemDeepReview }) {
   );
 
   const formatDate = (iso: string): string => {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString('zh-CN', {
+    const ms = parseAsUtc(iso);
+    if (Number.isNaN(ms)) return iso;
+    return new Date(ms).toLocaleString('zh-CN', {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
@@ -121,7 +147,34 @@ function ReviewCard({ review }: { review: EcosystemDeepReview }) {
     });
   };
 
-  const hasAnyContent = useMemo(
+  // 评审实际耗时：基于 started_at→(shallow_completed_at | completed_at) 的差值。
+  // 历史 row duration_seconds 多为 0，前端按 UTC 解析裸字符串自算。
+  const formatElapsed = (
+    start: string | null | undefined,
+    end: string | null | undefined,
+  ): string => {
+    if (!start || !end) return '—';
+    const ms = parseAsUtc(end) - parseAsUtc(start);
+    if (Number.isNaN(ms) || ms <= 0) return '—';
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ${sec % 60}s`;
+    const hr = Math.floor(min / 60);
+    return `${hr}h ${min % 60}m`;
+  };
+
+  const stage = (review.stage_status as string) ?? '';
+  const isShallowOnly = stage === 'shallow_done' || stage === 'queued' || stage === 'shallow_failed';
+  const stageLabel = stage
+    ? STAGE_STATUS_LABELS[stage as keyof typeof STAGE_STATUS_LABELS] ?? stage
+    : null;
+  const stageClass = stage ? stageBadgeClass(stage) : '';
+
+  // v1.5.2: 浅扫阶段 summary/architecture/risks/learnings 必空，shallow_summary 在 profile 上。
+  // 改用 stage 决定显示哪些字段，避免"已完成"+"一堆暂无数据"的违和感。
+  const showDeepFields = !isShallowOnly;
+  const hasDeepContent = useMemo(
     () =>
       Boolean(
         review.summary_md ||
@@ -133,20 +186,38 @@ function ReviewCard({ review }: { review: EcosystemDeepReview }) {
     [review],
   );
 
+  // 浅扫完成时的耗时端点优先 shallow_completed_at（若 backend 没写 completed_at）
+  const elapsedEnd = isShallowOnly
+    ? review.shallow_completed_at ?? review.completed_at
+    : review.completed_at;
+
   return (
     <div className="border rounded-md p-3 space-y-3 bg-card">
       <div className="flex flex-wrap items-center gap-2 justify-between">
         <div className="flex flex-wrap items-center gap-2">
-          <StatusBadge status={review.status} />
+          {/* v1.5.2: 有 stage_status 时只显示 stage 徽章，避免 status='running'+stage='shallow_done'
+              同时显示「深扫中（spinner）」+「浅扫完成」的语义冲突。失败/集成等终态下退回 status badge。 */}
+          {stageLabel ? (
+            <Badge variant="outline" className={`text-xs ${stageClass}`} title="当前 stage 进度">
+              {stageLabel}
+            </Badge>
+          ) : (
+            <StatusBadge status={review.status} />
+          )}
           <RecommendationBadge rec={review.integration_recommendation} />
-          <span className="text-xs text-muted-foreground">{formatDate(review.created_at)}</span>
+          <span className="text-xs text-muted-foreground" title="创建时间">
+            {formatDate(review.created_at)}
+          </span>
+          <span className="text-xs text-muted-foreground" title="started_at → 当前 stage 完成时间">
+            耗时 {formatElapsed(review.started_at, elapsedEnd)}
+          </span>
         </div>
         <Button
           variant="ghost"
           size="sm"
           className="h-7 px-2 text-xs"
           onClick={() => setExpanded((v) => !v)}
-          aria-label={expanded ? '收起深扫详情' : '展开深扫详情'}
+          aria-label={expanded ? '收起评审详情' : '展开评审详情'}
         >
           {expanded ? (
             <>
@@ -164,22 +235,36 @@ function ReviewCard({ review }: { review: EcosystemDeepReview }) {
 
       {expanded && (
         <div className="space-y-3">
-          {!hasAnyContent && !review.report_id && review.status === 'running' && (
-            <div className="flex items-start gap-2 text-xs text-blue-600 dark:text-blue-400 bg-blue-500/10 border border-blue-500/30 rounded p-2">
-              <Loader2 className="h-3.5 w-3.5 mt-0.5 shrink-0 animate-spin" aria-hidden="true" />
-              <span>深扫进行中 — 5 段式摘要将在完成后填充。可稍后刷新本页查看。</span>
-            </div>
+          {/* 浅扫阶段：直接展示 profile.shallow_summary，不显示深扫专属空字段 */}
+          {isShallowOnly && shallowSummary && (
+            <MarkdownBlock title="浅扫摘要" Icon={FileSearch} body={shallowSummary} />
           )}
-          {!hasAnyContent && !review.report_id && review.status === 'pending' && (
+          {isShallowOnly && (
             <p className="text-xs text-muted-foreground italic">
-              该深扫记录待启动，进入下一轮深扫批次后将自动开始。
+              当前为浅扫阶段。架构 / 风险 / 学习要点等字段将在进入深扫后填充。
             </p>
           )}
 
-          <MarkdownBlock title="摘要" Icon={FileSearch} body={review.summary_md} />
-          <MarkdownBlock title="架构" Icon={Building2} body={review.architecture_md} />
-          <MarkdownBlock title="风险" Icon={ShieldAlert} body={review.risks_md} />
-          <MarkdownBlock title="学习要点" Icon={Lightbulb} body={review.learnings_md} />
+          {/* 深扫及以后：显示 5 段式 markdown 字段 */}
+          {showDeepFields && !hasDeepContent && !review.report_id && review.status === 'running' && (
+            <div className="flex items-start gap-2 text-xs text-blue-600 dark:text-blue-400 bg-blue-500/10 border border-blue-500/30 rounded p-2">
+              <Loader2 className="h-3.5 w-3.5 mt-0.5 shrink-0 animate-spin" aria-hidden="true" />
+              <span>评审进行中 — 当前 stage 完成后，本卡片对应字段将自动填充。可稍后刷新本页查看。</span>
+            </div>
+          )}
+          {showDeepFields && !hasDeepContent && !review.report_id && review.status === 'pending' && (
+            <p className="text-xs text-muted-foreground italic">
+              该评审记录待启动，进入下一轮 stage 调度后将自动开始。
+            </p>
+          )}
+          {showDeepFields && (
+            <>
+              <MarkdownBlock title="摘要" Icon={FileSearch} body={review.summary_md} />
+              <MarkdownBlock title="架构" Icon={Building2} body={review.architecture_md} />
+              <MarkdownBlock title="风险" Icon={ShieldAlert} body={review.risks_md} />
+              <MarkdownBlock title="学习要点" Icon={Lightbulb} body={review.learnings_md} />
+            </>
+          )}
 
           {(review.demo_result || review.demo_log_excerpt) && (
             <section className="space-y-1.5">
@@ -247,20 +332,20 @@ function ReviewCard({ review }: { review: EcosystemDeepReview }) {
 }
 
 /**
- * 深扫摘要区 — 展示该仓所有深扫记录（一般 1 条，最新优先）。
+ * 评审记录区 — 展示该仓所有评审记录（浅/深/辩/集成多 stage 共享一行，最新优先）。
  */
-export function DeepReviewSection({ reviews }: DeepReviewSectionProps) {
+export function DeepReviewSection({ reviews, shallowSummary }: DeepReviewSectionProps) {
   if (!reviews || reviews.length === 0) {
     return (
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <FileSearch className="h-4 w-4" aria-hidden="true" />
-            深扫摘要
+            评审记录
           </CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          尚未对该仓库执行深度审查。被标记为"待深扫"的仓将在下一轮深扫批次中处理。
+          尚未对该仓库生成评审记录。先经浅扫生成 200-400 字摘要，再按相关性进入深扫调度。
         </CardContent>
       </Card>
     );
@@ -276,12 +361,12 @@ export function DeepReviewSection({ reviews }: DeepReviewSectionProps) {
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
           <FileSearch className="h-4 w-4" aria-hidden="true" />
-          深扫摘要 ({reviews.length})
+          评审记录 ({reviews.length})
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         {sorted.map((review) => (
-          <ReviewCard key={review.id} review={review} />
+          <ReviewCard key={review.id} review={review} shallowSummary={shallowSummary} />
         ))}
       </CardContent>
     </Card>

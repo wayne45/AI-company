@@ -9,6 +9,7 @@ import {
   Archive,
   RefreshCcw,
   AlertTriangle,
+  FlaskConical,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -16,8 +17,6 @@ import { Button } from '@/components/ui/button';
 import type { EcosystemRepoProfile } from '@/api/ecosystem';
 import {
   CATEGORY_LABELS,
-  STAGE_STATUS_LABELS,
-  stageBadgeClass,
   useRetryFailedRepo,
 } from '@/api/ecosystem';
 
@@ -92,7 +91,9 @@ export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
   const summary =
     repo.shallow_summary || repo.one_line_summary || repo.description_excerpt || repo.description || '暂无描述';
 
-  const stage = stageProp ?? inferStage(repo);
+  // v1.5.1：优先用后端透出的 stage_status（latest deep_review），无则按 profile 字段推断
+  const stage = stageProp ?? repo.stage_status ?? inferStage(repo);
+  const researchCount = repo.research_count ?? 0;
   const isFailed = stage.endsWith('_failed') || (repo.fetch_failure_count ?? 0) >= 3;
   const isDeleted = !!repo.is_deleted;
   const isPrivate = !!repo.is_private_now;
@@ -142,27 +143,32 @@ export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
             </div>
           </div>
 
-          {/* Stage 徽章条 */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span
-              className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium ${stageBadgeClass(stage)}`}
-              title={`stage: ${stage}`}
-            >
-              {STAGE_STATUS_LABELS[stage as keyof typeof STAGE_STATUS_LABELS] ?? stage}
-            </span>
-            {isDeleted && (
-              <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
-                <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
-                已删除
-              </span>
-            )}
-            {isPrivate && (
-              <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
-                <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
-                被设私有
-              </span>
-            )}
-          </div>
+          {/* 徽章条：研究次数 + 异常状态（v1.5.1：去掉 stage 文字徽章，stage 细节在研究历程里看）*/}
+          {(researchCount > 0 || isDeleted || isPrivate) && (
+            <div className="flex flex-wrap items-center gap-1">
+              {researchCount > 0 && (
+                <span
+                  className="inline-flex items-center gap-0.5 rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary"
+                  title={`已被研究 ${researchCount} 次（点击进详情查看研究历程：每次涉及的系统改动 / 相关性 / 是否采用）`}
+                >
+                  <FlaskConical className="h-2.5 w-2.5" aria-hidden="true" />
+                  研究 ×{researchCount}
+                </span>
+              )}
+              {isDeleted && (
+                <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
+                  <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                  已删除
+                </span>
+              )}
+              {isPrivate && (
+                <span className="inline-flex items-center gap-0.5 rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:text-rose-300">
+                  <AlertTriangle className="h-2.5 w-2.5" aria-hidden="true" />
+                  被设私有
+                </span>
+              )}
+            </div>
+          )}
 
           {/* 一句话摘要（优先 shallow_summary） */}
           <p className="text-xs text-muted-foreground line-clamp-2 min-h-[2rem]">

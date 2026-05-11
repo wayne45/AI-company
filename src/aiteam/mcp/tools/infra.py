@@ -41,10 +41,18 @@ def register(mcp):
                 if best_p is not None:
                     result["project"] = {"id": best_p["id"], "name": best_p.get("name", "")}
 
+            # v1.5.2 fix: project-aware active team resolution.
+            # Filter teams by current project_id so a Leader in cwd=A doesn't pick up
+            # another project B's active team (root cause of 2026-05-08 cross-project agent dispatch).
+            current_project_id = result["project"]["id"] if result["project"] else None
             teams_data = _api_call("GET", "/api/teams")
-            active_teams = [t for t in teams_data.get("data", []) if t.get("status") == "active"]
-            if active_teams:
-                team = active_teams[0]
+            all_active = [t for t in teams_data.get("data", []) if t.get("status") == "active"]
+            if current_project_id:
+                project_teams = [t for t in all_active if t.get("project_id") == current_project_id]
+            else:
+                project_teams = []  # No project resolved → no team (avoid cross-project leak)
+            if project_teams:
+                team = project_teams[0]
                 result["team"] = {"id": team["id"], "name": team["name"]}
                 agents_data = _api_call("GET", f"/api/teams/{team['id']}/agents")
                 result["agents"] = [

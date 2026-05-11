@@ -63,15 +63,15 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
   const minStarsValue = filters.minStars ?? 0;
   const starLabel = STAR_OPTIONS.find((o) => o.value === minStarsValue)?.label ?? '不限星标';
 
-  // 研究阶段 trigger 显示文本（v1.5.0 漏斗 3 类互斥，对齐 StatsBar 数字）
+  // 研究阶段 trigger 显示文本（v1.5.1：3 类互斥，语义对齐 StatsBar）
   const STAGE_LABELS: Record<string, string> = {
     queued: '待浅扫',
-    shallow_done: '已浅扫',
-    'architecture_done,debated,referenced,integrated': '已深扫',
+    shallow_done: '已浅扫未研究',
+    'architecture_done,debated,referenced,integrated': '已被研究',
   };
   const stageLabel = filters.stageStatus
     ? (STAGE_LABELS[filters.stageStatus] ?? filters.stageStatus)
-    : '全部研究阶段';
+    : '全部仓';
 
   return (
     <div className="flex flex-col gap-3 p-4 border-b bg-muted/20">
@@ -149,7 +149,7 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
           </SelectContent>
         </Select>
 
-        {/* 研究阶段（v1.5.0 漏斗 4 类）*/}
+        {/* 研究阶段（v1.5.0 漏斗，v1.5.1 加语义说明）*/}
         <Select
           value={filters.stageStatus || ALL}
           onValueChange={(v) =>
@@ -158,14 +158,33 @@ export function FilterBar({ filters, onChange, totalCount, facetCounts }: Filter
             })
           }
         >
-          <SelectTrigger className="h-8 min-w-[160px] text-sm" aria-label="研究阶段">
+          <SelectTrigger
+            className="h-8 min-w-[170px] text-sm"
+            aria-label="研究阶段"
+            title="浅扫=读 README/CHANGELOG 摘要功能与方向；研究=按需调研代码结构与设计，含相关性与采纳记录"
+          >
             <span className="truncate">{stageLabel}</span>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={ALL}>全部研究阶段</SelectItem>
-            <SelectItem value="queued">待浅扫</SelectItem>
-            <SelectItem value="shallow_done">已浅扫</SelectItem>
-            <SelectItem value="architecture_done,debated,referenced,integrated">已深扫</SelectItem>
+            <SelectItem value={ALL}>全部仓</SelectItem>
+            <SelectItem value="queued">
+              <span className="flex flex-col">
+                <span>待浅扫</span>
+                <span className="text-[10px] text-muted-foreground">尚未读 README/CHANGELOG</span>
+              </span>
+            </SelectItem>
+            <SelectItem value="shallow_done">
+              <span className="flex flex-col">
+                <span>已浅扫未研究</span>
+                <span className="text-[10px] text-muted-foreground">已摘要功能/设计方向</span>
+              </span>
+            </SelectItem>
+            <SelectItem value="architecture_done,debated,referenced,integrated">
+              <span className="flex flex-col">
+                <span>已被研究</span>
+                <span className="text-[10px] text-muted-foreground">为系统改动做过调研</span>
+              </span>
+            </SelectItem>
           </SelectContent>
         </Select>
 

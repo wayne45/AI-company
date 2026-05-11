@@ -33,6 +33,10 @@ export interface EcosystemRepoProfile {
   fetch_failure_count?: number;
   is_active?: boolean;
   active_rank?: number | null;
+  // v1.5.1：透出渐进漏斗 stage 状态（取自 latest deep_review，无 review = "queued"）
+  stage_status?: string | null;
+  // v1.5.1：研究次数（关联的 deep_review 行数，0 = 未深扫）
+  research_count?: number;
 }
 
 // v1.5.0 漏斗 stage 状态
@@ -106,6 +110,9 @@ export interface EcosystemFacetCounts {
   category: Record<string, number>;
   language: Record<string, number>;
   archived: Record<string, number>; // {"true": n, "false": n}
+  // v1.5.1：渐进漏斗 stage 分布（不被 limit 截断的全量统计）
+  // 例如：{"queued": 162, "shallow_done": 100, "debated": 3}
+  stage?: Record<string, number>;
 }
 
 export interface EcosystemProfilesResponse {
@@ -217,6 +224,9 @@ export interface EcosystemDeepReview {
   integration_recommendation: string | null; // adopt / experiment / hold / avoid
   report_id: string | null;
   created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_seconds?: number;
   // v1.5.0-A 字段（前端 timeline 依赖）
   stage_status?: EcosystemStageStatus | string;
   integration_md?: string;
@@ -277,6 +287,25 @@ export interface EcosystemDeepReviewListResponse {
  * 注意：profile.needs_deep_review 字段语义是"是否需要被深扫"，false 不等于"已完成深扫"。
  * 必须用本接口拉真实 DeepReview 行为准。
  */
+/**
+ * GET /api/ecosystem/scan-runs?limit=N — 最近 N 次批次扫描记录（生态档案级）
+ * 用于 EcosystemListPage 顶部展示"最近批次扫描"概览。
+ * 返回按 started_at 倒序，最近一次 = list[0]。
+ */
+export function useEcosystemRecentScanRuns(limit: number = 5) {
+  return useQuery({
+    queryKey: ['ecosystem', 'scan-runs', limit],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set('limit', String(limit));
+      return apiFetch<{ data: EcosystemScanRun[]; total: number }>(
+        `/api/ecosystem/scan-runs?${params.toString()}`,
+      );
+    },
+    staleTime: 30_000,
+  });
+}
+
 export function useEcosystemDeepReviews(status: string = '') {
   return useQuery({
     queryKey: ['ecosystem', 'deep_reviews', status],
@@ -346,10 +375,10 @@ export function useEcosystemRepoFull(repoIdOrName: string | null) {
   });
 }
 
-/** 深扫状态中文映射 */
+/** 评审 status 中文映射 — 通用语义（v1.5.2: "深扫中" → "评审中"，因为 status 不区分浅/深 stage） */
 export const DEEP_REVIEW_STATUS_LABELS: Record<string, string> = {
-  pending: '待深扫',
-  running: '深扫中',
+  pending: '待评审',
+  running: '评审中',
   completed: '已完成',
   failed: '失败',
   skipped: '已跳过',

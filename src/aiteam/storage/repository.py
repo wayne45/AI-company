@@ -2772,6 +2772,8 @@ class StorageRepository:
         limit: int = 50,
         offset: int = 0,
         project_id: str | None = None,
+        id_filter: list[str] | None = None,
+        id_exclude: list[str] | None = None,
     ) -> tuple[list[EcosystemRepoProfile], int]:
         """Stage E 扩展检索：支持 tags / language / pushed_after / 多种排序。
 
@@ -2794,6 +2796,12 @@ class StorageRepository:
                 )
 
             # 基础字段过滤
+            if id_filter is not None:
+                if not id_filter:
+                    return ([], 0)
+                stmt = stmt.where(EcosystemRepoProfileModel.id.in_(id_filter))
+            if id_exclude:
+                stmt = stmt.where(EcosystemRepoProfileModel.id.notin_(id_exclude))
             if min_stars > 0:
                 stmt = stmt.where(EcosystemRepoProfileModel.stars >= min_stars)
             if max_stars is not None and max_stars > 0:
@@ -2978,10 +2986,41 @@ class StorageRepository:
                 key = "true" if row[0] else "false"
                 archived_counts[key] = int(row[1])
 
+            # v1.5.1: stage facet — 透出渐进漏斗状态分布（让前端 StatsBar/筛选不被 limit 截断）
+            # 实现：1) 取所有 deep_reviews 按 created_at desc 在 Python 端聚合 latest stage map
+            #       2) 再取所有满足 filter 的 profile id，按 stage_map 聚合
+            # 当前数据量级（< 1万 reviews）此方案够用；后续大表可改窗口函数 SQL。
+            all_reviews_q = select(
+                EcosystemDeepReviewModel.repo_id,
+                EcosystemDeepReviewModel.stage_status,
+            ).order_by(EcosystemDeepReviewModel.created_at.desc())
+            if effective_pid is not None:
+                all_reviews_q = all_reviews_q.where(
+                    EcosystemDeepReviewModel.project_id == effective_pid
+                )
+            all_reviews_result = await session.execute(all_reviews_q)
+            latest_stage_map: dict[str, str] = {}
+            for row in all_reviews_result.all():
+                rid = row[0]
+                if rid in latest_stage_map:
+                    continue
+                stg = row[1]
+                latest_stage_map[rid] = (
+                    stg.value if hasattr(stg, "value") else stg
+                ) or "queued"
+
+            profile_ids_q = _apply_filters(select(EcosystemRepoProfileModel.id))
+            profile_ids_result = await session.execute(profile_ids_q)
+            stage_counts: dict[str, int] = {}
+            for row in profile_ids_result.all():
+                stg2 = latest_stage_map.get(row[0], "queued")
+                stage_counts[stg2] = stage_counts.get(stg2, 0) + 1
+
             return {
                 "category": category_counts,
                 "language": language_counts,
                 "archived": archived_counts,
+                "stage": stage_counts,
             }
 
     async def get_ecosystem_profile_full(

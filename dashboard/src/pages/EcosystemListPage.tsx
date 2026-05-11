@@ -9,6 +9,7 @@ import type { EcosystemFilters } from '@/api/ecosystem';
 import { RepoCard } from '@/components/ecosystem/RepoCard';
 import { FilterBar } from '@/components/ecosystem/FilterBar';
 import { EcosystemStatsBar } from '@/components/ecosystem/EcosystemStatsBar';
+import { RecentScanRunsBar } from '@/components/ecosystem/RecentScanRunsBar';
 import { useProject } from '@/context/ProjectContext';
 
 type LifecycleTab = 'active' | 'all' | 'deleted';
@@ -100,6 +101,9 @@ export function EcosystemListPage() {
           </TabsList>
         </Tabs>
       </div>
+
+      {/* 最近批次扫描概览（v1.5.2: 从单仓详情页迁回生态档案级位置） */}
+      <RecentScanRunsBar />
 
       {/* 统计条 */}
       {!error && !isLoading && (

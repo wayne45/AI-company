@@ -124,17 +124,38 @@ SHALLOW_AGENT_PROMPT = """\
 ## 已知 lesson（自学习注入）
 {lessons_section}
 
-## 完成后调用
-ecosystem_apply_shallow_summary(
+## 完成后（双通道，两步都必须做）
+
+### 1) Primary: 调 MCP 工具写回 DB
+mcp__ai-team-os__ecosystem_apply_shallow_summary(
     repo_id="{repo_id}",
     shallow_summary="<200-400 字中文 markdown>",
     deep_review_id="{deep_review_id}",
 )
 
+### 2) Fallback: SendMessage 把 summary 文本回执给 team-lead
+即使 1) 成功也要发，方便 Leader 审计 + 在工具不可用时兜底写回。
+消息格式（必须严格按以下字段，Leader 会正则解析）：
+
+  [shallow-scan-result]
+  repo_id={repo_id}
+  deep_review_id={deep_review_id}
+  ===summary===
+  <完整 200-400 字中文 markdown>
+  ===end===
+
+调用示例：
+  SendMessage(
+      to="team-lead",
+      summary="shallow scan {repo_full_name} done",
+      message="<上面那段含 [shallow-scan-result] 的纯文本>"
+  )
+
 ## 约束
 - 总长 200-400 字，超出会被截断。
-- 不要 clone 仓（用 GitHub README API），节省时间。
+- 不要 clone 仓（用 GitHub README API / WebFetch），节省时间。
 - 输出必须是中文 markdown，不要 JSON / 代码块包裹。
+- 如果 MCP 工具报"tool unavailable"，请仍然完成步骤 2)，由 Leader 兜底写回。
 """
 
 

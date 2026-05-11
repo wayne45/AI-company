@@ -94,7 +94,16 @@ def _parse_profile(data: EcosystemProfileCreate) -> EcosystemRepoProfile:
     )
 
 
-def _profile_to_dict(p: EcosystemRepoProfile) -> dict[str, Any]:
+def _profile_to_dict(
+    p: EcosystemRepoProfile,
+    stage_status: str | None = None,
+    research_count: int = 0,
+) -> dict[str, Any]:
+    """序列化 profile。
+
+    v1.5.1：透出 stage_status（取自 latest deep_review；无 review 时调用方传 "queued"）。
+    research_count = 该 repo 关联的 deep_review 行数（前端用于 RepoCard 研究次数徽章）。
+    """
     return {
         "id": p.id,
         "repo_full_name": p.repo_full_name,
@@ -129,7 +138,54 @@ def _profile_to_dict(p: EcosystemRepoProfile) -> dict[str, Any]:
         "fetch_failure_count": p.fetch_failure_count,
         "is_active": p.is_active,
         "active_rank": p.active_rank,
+        # v1.5.1 新增：透出渐进漏斗 stage 状态 + 研究次数（让前端徽章渲染 + 总数统计准确）
+        "stage_status": stage_status or "queued",
+        "research_count": research_count,
     }
+
+
+async def _build_stage_map(
+    repo: StorageRepository,
+    profile_ids: list[str],
+) -> tuple[dict[str, str], dict[str, int]]:
+    """批量获取每个 profile 的 latest deep_review.stage_status + 研究次数。
+
+    返回 (stage_map, count_map)：
+    - stage_map[repo_id] = "queued" / "shallow_done" / ...（latest deep_review，无则 "queued"）
+    - count_map[repo_id] = 该 repo 真正被研究过的次数（v1.5.2: 只数 architecture_done+ 的行，
+      浅扫完成不计入 — 浅扫是预筛动作，不属于"被研究")
+
+    一次性查询所有 reviews（按 created_at desc），Python 端聚合，避免路由层 N+1。
+    """
+    # v1.5.2: "已被研究"的语义边界 — 进入 architecture stage 后才算
+    _RESEARCHED_STAGES = {"architecture_done", "debated", "referenced", "integrated"}
+
+    stage_map: dict[str, str] = {}
+    count_map: dict[str, int] = {}
+    if not profile_ids:
+        return stage_map, count_map
+    id_set = set(profile_ids)
+    # list_deep_reviews 不支持 IN 多 id，但限定 limit 后 Python 过滤已足够（当前 < 数千行）
+    reviews = await repo.list_deep_reviews(limit=10000)
+    for r in reviews:
+        if r.repo_id not in id_set:
+            continue
+        # 只数真正被研究过的行（不含浅扫 shallow_done / queued / *_failed）
+        stage_value = (
+            r.stage_status.value
+            if hasattr(r.stage_status, "value")
+            else (r.stage_status or "")
+        )
+        if stage_value in _RESEARCHED_STAGES:
+            count_map[r.repo_id] = count_map.get(r.repo_id, 0) + 1
+        if r.repo_id not in stage_map:
+            # list_deep_reviews 已按 created_at desc，第一条即 latest
+            stage_map[r.repo_id] = stage_value or "queued"
+    # 兜底：没 review 的 profile 视作 queued
+    for pid in profile_ids:
+        stage_map.setdefault(pid, "queued")
+        count_map.setdefault(pid, 0)
+    return stage_map, count_map
 
 
 @router.post("/profiles")
@@ -181,6 +237,41 @@ async def search_profiles(
     pushed_after_dt = _parse_dt(pushed_after) if pushed_after else None
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
+    # v1.5.1: stage_status filter 不依赖 stars limit — 先全 DB 算 stage_map 找 wanted_ids
+    id_filter: list[str] | None = None
+    id_exclude: list[str] | None = None
+    if stage_status:
+        wanted_stages = {s.strip() for s in stage_status.split(",") if s.strip()}
+        if wanted_stages:
+            full_reviews = await repo.list_deep_reviews(limit=10000)
+            full_stage_map: dict[str, str] = {}
+            for r in full_reviews:
+                if r.repo_id in full_stage_map:
+                    continue  # latest_only（list_deep_reviews 已 created_at desc）
+                stg = (
+                    r.stage_status.value
+                    if hasattr(r.stage_status, "value")
+                    else r.stage_status
+                ) or "queued"
+                full_stage_map[r.repo_id] = stg
+
+            other_wanted = wanted_stages - {"queued"}
+            wants_queued = "queued" in wanted_stages
+
+            if wants_queued and not other_wanted:
+                # 纯 queued: 排除所有有 review 的仓（无论 stage）
+                id_exclude = list(full_stage_map.keys())
+            elif other_wanted and not wants_queued:
+                # 纯非-queued: 限定到匹配 stages 的仓
+                id_filter = [
+                    rid for rid, stg in full_stage_map.items() if stg in other_wanted
+                ]
+            elif wants_queued and other_wanted:
+                # queued + 其他: 排除"有 review 但 stage 不匹配"的仓
+                id_exclude = [
+                    rid for rid, stg in full_stage_map.items() if stg not in other_wanted
+                ]
+
     profiles, total = await repo.search_ecosystem_profiles_extended(
         keyword=keyword,
         topic=topic,
@@ -196,39 +287,32 @@ async def search_profiles(
         sort=sort,
         limit=limit,
         offset=offset,
+        id_filter=id_filter,
+        id_exclude=id_exclude,
     )
 
-    # v1.5.0-E 客户端二次过滤：is_active / is_deleted / stage_status
-    # （service 层尚未提供这些参数，先在路由层做兼容性筛选）
+    # v1.5.0-E 客户端二次过滤：is_active / is_deleted
     if is_active is not None:
         profiles = [p for p in profiles if p.is_active == is_active]
     if is_deleted is not None:
         profiles = [p for p in profiles if p.is_deleted == is_deleted]
-    if stage_status:
-        # 通过最新 deep_review 的 stage_status 过滤（昂贵，仅 limit<=200 时可接受）
-        wanted_stages = {s.strip() for s in stage_status.split(",") if s.strip()}
-        if wanted_stages:
-            kept: list[EcosystemRepoProfile] = []
-            for p in profiles:
-                reviews = await repo.list_deep_reviews(repo_id=p.id, limit=1)
-                latest_review = reviews[0] if reviews else None
-                if latest_review:
-                    stage = (
-                        latest_review.stage_status.value
-                        if hasattr(latest_review.stage_status, "value")
-                        else latest_review.stage_status
-                    )
-                else:
-                    # 没有 review 时视作 queued（待 Stage 0）
-                    stage = "queued"
-                if stage in wanted_stages:
-                    kept.append(p)
-            profiles = kept
-    if is_active is not None or is_deleted is not None or stage_status:
+
+    # v1.5.1: 一次性批量获取 stage_map + count_map（消除原 N+1 查询）
+    stage_map, count_map = await _build_stage_map(repo, [p.id for p in profiles])
+
+    # stage_status 已在 SQL 层用 id_filter / id_exclude 完成；路由层不再后过滤
+    if is_active is not None or is_deleted is not None:
         total = len(profiles)
 
     payload: dict[str, Any] = {
-        "profiles": [_profile_to_dict(p) for p in profiles],
+        "profiles": [
+            _profile_to_dict(
+                p,
+                stage_status=stage_map.get(p.id, "queued"),
+                research_count=count_map.get(p.id, 0),
+            )
+            for p in profiles
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -1222,12 +1306,12 @@ async def apply_shallow_summary(
             body.deep_review_id,
             EcosystemStageStatus.SHALLOW_DONE,
         )
-        # Also mark the workflow row completed so the downstream UI
-        # treats the run as finished.
+        # v1.5.2 fix: 浅扫完成 ≠ 整个评审完成。保留 status='running'，
+        # 让前端按 stage_status 区分浅/深/辩/集成；同时仍写 completed_at
+        # 以便 stage 0 耗时可计算。整体评审完成由 Stage 3 (referenced/integrated) 触发。
         if review is not None:
             await repo.update_deep_review(
                 body.deep_review_id,
-                status="completed",
                 completed_at=datetime.now(tz=timezone.utc),
             )
 
