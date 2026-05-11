@@ -1026,6 +1026,11 @@ class EcosystemRepoProfileModel(Base):
     # v1.6.0-P0.4 NormalizedSignal fields
     popularity_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
     activity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # v1.6.0-P1.A manual status
+    manual_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    manual_status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manual_status_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manual_status_set_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     def to_pydantic(self) -> EcosystemRepoProfile:
         """Convert to Pydantic model."""
@@ -1074,6 +1079,10 @@ class EcosystemRepoProfileModel(Base):
             last_status_change_at=self.last_status_change_at,
             popularity_percentile=self.popularity_percentile,
             activity_score=self.activity_score,
+            manual_status=self.manual_status,
+            manual_status_reason=self.manual_status_reason,
+            manual_status_set_at=self.manual_status_set_at,
+            manual_status_set_by=self.manual_status_set_by,
         )
 
     @classmethod
@@ -1117,6 +1126,10 @@ class EcosystemRepoProfileModel(Base):
             last_status_change_at=p.last_status_change_at,
             popularity_percentile=p.popularity_percentile,
             activity_score=p.activity_score,
+            manual_status=p.manual_status,
+            manual_status_reason=p.manual_status_reason,
+            manual_status_set_at=p.manual_status_set_at,
+            manual_status_set_by=p.manual_status_set_by,
         )
 
 
@@ -1707,7 +1720,10 @@ class EcosystemIndexDiffModel(Base):
     reactivated_count: Mapped[int] = mapped_column(Integer, default=0)
     deactivated_count: Mapped[int] = mapped_column(Integer, default=0)
     stale_count: Mapped[int] = mapped_column(Integer, default=0)
-    archived_count: Mapped[int] = mapped_column(Integer, default=0)
+    archived_count: Mapped[int] = mapped_column(Integer, default=0)  # deprecated: use github_archived_changed_count
+    # v1.6.0-P1 hotfix: new semantically-correct columns
+    github_archived_changed_count: Mapped[int] = mapped_column(Integer, default=0)
+    removed_from_query_count: Mapped[int] = mapped_column(Integer, default=0)
     details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     markdown_summary: Mapped[str] = mapped_column(Text, default="")
     alerted: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -1725,6 +1741,9 @@ class EcosystemIndexDiffModel(Base):
                 details = json.loads(self.details_json)
             except Exception:
                 pass
+        # Read new columns; fall back to old archived_count for rows written before P1 hotfix
+        github_archived = getattr(self, "github_archived_changed_count", None) or self.archived_count
+        removed_from_query = getattr(self, "removed_from_query_count", None) or 0
         return EcosystemIndexDiff(
             id=self.id,
             scan_run_id=self.scan_run_id,
@@ -1735,6 +1754,8 @@ class EcosystemIndexDiffModel(Base):
             deactivated_count=self.deactivated_count,
             stale_count=self.stale_count,
             archived_count=self.archived_count,
+            github_archived_changed_count=github_archived,
+            removed_from_query_count=removed_from_query,
             details_json=details,
             markdown_summary=self.markdown_summary or "",
             alerted=self.alerted or False,
@@ -1754,7 +1775,9 @@ class EcosystemIndexDiffModel(Base):
             reactivated_count=diff.reactivated_count,
             deactivated_count=diff.deactivated_count,
             stale_count=diff.stale_count,
-            archived_count=diff.archived_count,
+            archived_count=0,  # deprecated: always write 0 going forward
+            github_archived_changed_count=diff.github_archived_changed_count,
+            removed_from_query_count=diff.removed_from_query_count,
             details_json=json.dumps(diff.details_json),
             markdown_summary=diff.markdown_summary,
             alerted=diff.alerted,

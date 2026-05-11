@@ -156,8 +156,11 @@ async def test_get_scan_profile_returns_default_when_none(client: AsyncClient) -
     assert body["is_default"] is True
     profile = body["scan_profile"]
     assert profile["id"] is None
-    assert "active_definition" in profile["profile"]
-    assert "inactive_signals" in profile["profile"]
+    # v1.6.0-P1.A: simplified profile — stars gate only, no inactivity signals
+    assert "popularity_floor" in profile["profile"]
+    assert "alert_thresholds" in profile["profile"]
+    assert "active_definition" not in profile["profile"]
+    assert "inactive_signals" not in profile["profile"]
 
 
 @pytest.mark.asyncio

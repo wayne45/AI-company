@@ -149,6 +149,14 @@ COLUMNS_TO_ENSURE: list[tuple[str, str, str]] = [
     # v1.6.0-P0.4: NormalizedSignal fields on ecosystem_repo_profiles
     ("ecosystem_repo_profiles", "popularity_percentile", "FLOAT"),
     ("ecosystem_repo_profiles", "activity_score", "FLOAT"),
+    # v1.6.0-P1.A: manual status fields for human-flagged no-value repos
+    ("ecosystem_repo_profiles", "manual_status", "VARCHAR(20)"),
+    ("ecosystem_repo_profiles", "manual_status_reason", "TEXT"),
+    ("ecosystem_repo_profiles", "manual_status_set_at", "DATETIME"),
+    ("ecosystem_repo_profiles", "manual_status_set_by", "VARCHAR(100)"),
+    # v1.6.0-P1 hotfix: new semantically-correct columns for index_diffs schema
+    ("ecosystem_index_diffs", "github_archived_changed_count", "INTEGER DEFAULT 0"),
+    ("ecosystem_index_diffs", "removed_from_query_count", "INTEGER DEFAULT 0"),
 ]
 
 

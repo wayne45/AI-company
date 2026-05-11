@@ -274,14 +274,15 @@ async def test_index_update_alert_threshold_new(
 
 
 @pytest.mark.asyncio
-async def test_normalized_signal_rank1_percentile_1(
+async def test_new_repo_above_floor_gets_active_status(
     client: AsyncClient,
     repo: StorageRepository,
 ) -> None:
-    """With a single repo in scan results, it should get rank=1 and percentile=1.0."""
+    """P1.A: repo above popularity_floor (5000 stars) gets last_active_status='active'."""
     await _setup_quick(client, queries=["topic:mcp"])
 
-    single_repo = [_fake_repo("top-repo", stars=5000, pushed_days_ago=5)]
+    # Use stars >= 5000 (new default floor)
+    single_repo = [_fake_repo("top-repo", stars=6000, pushed_days_ago=5)]
     gh_auth_ok = MagicMock(returncode=0)
 
     with (
@@ -304,12 +305,12 @@ async def test_normalized_signal_rank1_percentile_1(
     assert resp.status_code == 200
     body = resp.json()
     assert body["success"] is True
+    assert body["diff"]["new_count"] == 1
 
-    # Check profile was upserted with popularity_percentile via direct DB query
+    # P1.A: active status (no rank/percentile signal — stars gate only)
     profile = await repo.get_ecosystem_profile("owner/top-repo", project_id=PROJECT_ID)
     if profile is not None:
-        # popularity_percentile = 1 - (1-1)/1 = 1.0
-        assert profile.popularity_percentile == pytest.approx(1.0)
+        assert profile.last_active_status == "active"
 
 
 # ---------------------------------------------------------------
@@ -318,15 +319,19 @@ async def test_normalized_signal_rank1_percentile_1(
 
 
 @pytest.mark.asyncio
-async def test_incremental_diff_deactivated_when_repo_missing(
+async def test_incremental_diff_repo_missing_is_preserved(
     client: AsyncClient,
     repo: StorageRepository,
 ) -> None:
-    """A repo present in round 1 but absent in round 2 should be deactivated."""
+    """P1.A: repo absent from scan round 2 is preserved (not deactivated).
+
+    Stars >= 5000 required for both rounds (new popularity_floor).
+    Absent repos appear in removed_from_query_count but status is NOT changed.
+    """
     await _setup_quick(client, queries=["topic:mcp"])
 
-    round1 = [_fake_repo("stable-repo", stars=3000), _fake_repo("vanishing-repo", stars=2000)]
-    round2 = [_fake_repo("stable-repo", stars=3000)]  # vanishing-repo is gone
+    round1 = [_fake_repo("stable-repo", stars=6000), _fake_repo("vanishing-repo", stars=5500)]
+    round2 = [_fake_repo("stable-repo", stars=6000)]  # vanishing-repo is gone
 
     gh_auth_ok = MagicMock(returncode=0)
 
@@ -348,8 +353,9 @@ async def test_incremental_diff_deactivated_when_repo_missing(
             headers={"X-Project-Id": PROJECT_ID},
         )
     assert r1.status_code == 200
+    assert r1.json()["diff"]["new_count"] == 2
 
-    # Round 2 — vanishing-repo is gone
+    # Round 2 — vanishing-repo is absent
     with (
         patch("subprocess.run", return_value=gh_auth_ok),
         patch(
@@ -370,8 +376,14 @@ async def test_incremental_diff_deactivated_when_repo_missing(
     assert r2.status_code == 200
     body2 = r2.json()
     assert body2["success"] is True
-    # vanishing-repo should appear as deactivated
-    assert body2["diff"]["deactivated_count"] >= 1
+    # P1.A: absent repos are preserved — they appear in removed_from_query_count
+    assert body2["diff"]["removed_from_query_count"] >= 1
+    # deactivated_count field no longer exists in P1.A diff
+    assert "deactivated_count" not in body2["diff"] or body2["diff"].get("deactivated_count", 0) == 0
+
+    # Verify vanishing-repo still exists in DB with original status
+    vanishing = await repo.get_ecosystem_profile("owner/vanishing-repo", project_id=PROJECT_ID)
+    assert vanishing is not None, "P1.A: DB repos must be preserved even when absent from scan"
 
 
 # ---------------------------------------------------------------
@@ -485,8 +497,8 @@ async def test_dry_run_does_not_write_profile_table(
     """Critical: dry_run=True must not insert or update any row in ecosystem_repo_profiles."""
     await _setup_quick(client, queries=["topic:mcp"])
 
-    # Seed 3 baseline repos directly into DB via a real run first
-    seed_repos = [_fake_repo(f"seed{i}", stars=3000 - i * 100) for i in range(3)]
+    # Seed 3 baseline repos — use stars >= 5000 (P1.A popularity_floor)
+    seed_repos = [_fake_repo(f"seed{i}", stars=6000 - i * 100) for i in range(3)]
     gh_auth_ok = MagicMock(returncode=0)
 
     with (
@@ -515,8 +527,8 @@ async def test_dry_run_does_not_write_profile_table(
     diff_before = await repo.get_latest_index_diff(PROJECT_ID)
     diff_id_before = diff_before.id if diff_before else None
 
-    # Now dry_run with 5 repos (3 existing + 2 new)
-    dry_repos = seed_repos + [_fake_repo("new1", stars=2000), _fake_repo("new2", stars=1500)]
+    # Now dry_run with 5 repos (3 existing + 2 new, all >= 5000 stars for P1.A floor)
+    dry_repos = seed_repos + [_fake_repo("new1", stars=5100), _fake_repo("new2", stars=5050)]
 
     with (
         patch("subprocess.run", return_value=gh_auth_ok),
@@ -565,6 +577,107 @@ async def test_dry_run_does_not_write_profile_table(
     )
 
 
+# ---------------------------------------------------------------
+# BUG-P1A-1: new repos must have canonical_id NOT NULL
+# ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_repo_has_canonical_id_filled(
+    client: AsyncClient,
+    repo: StorageRepository,
+) -> None:
+    """BUG-P1A-1 regression: new repos inserted via index_update must have canonical_id set."""
+    await _setup_quick(client, queries=["topic:mcp"])
+
+    single_repo = [_fake_repo("canonical-test", stars=6000)]
+    gh_auth_ok = MagicMock(returncode=0)
+
+    with (
+        patch("subprocess.run", return_value=gh_auth_ok),
+        patch(
+            "aiteam.api.routes.ecosystem.default_gh_search",
+            new=AsyncMock(return_value=single_repo),
+        ),
+        patch(
+            "aiteam.services.ecosystem_scanner.default_gh_search",
+            new=AsyncMock(return_value=single_repo),
+        ),
+    ):
+        resp = await client.post(
+            "/api/ecosystem/index_update",
+            json={"dry_run": False},
+            headers={"X-Project-Id": PROJECT_ID},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+
+    profile = await repo.get_ecosystem_profile("owner/canonical-test", project_id=PROJECT_ID)
+    assert profile is not None
+    assert profile.canonical_id is not None, "BUG-P1A-1: canonical_id must not be NULL for new repos"
+    assert profile.canonical_id == "github/owner/canonical-test"
+    assert profile.source_kind == "github"
+
+
+# ---------------------------------------------------------------
+# BUG-P1A-2: index_diffs must persist new column names
+# ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_index_diff_persists_new_schema_columns(
+    client: AsyncClient,
+    repo: StorageRepository,
+) -> None:
+    """BUG-P1A-2 regression: index_update must persist github_archived_changed_count and
+    removed_from_query_count to the DB (not just return them in the API response).
+    """
+    await _setup_quick(client, queries=["topic:mcp"])
+
+    mock_repos = [_fake_repo("schema-test", stars=6000)]
+    gh_auth_ok = MagicMock(returncode=0)
+
+    with (
+        patch("subprocess.run", return_value=gh_auth_ok),
+        patch(
+            "aiteam.api.routes.ecosystem.default_gh_search",
+            new=AsyncMock(return_value=mock_repos),
+        ),
+        patch(
+            "aiteam.services.ecosystem_scanner.default_gh_search",
+            new=AsyncMock(return_value=mock_repos),
+        ),
+    ):
+        resp = await client.post(
+            "/api/ecosystem/index_update",
+            json={"dry_run": False},
+            headers={"X-Project-Id": PROJECT_ID},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+
+    # Verify new columns are in the DB row (not just API response)
+    diff = await repo.get_latest_index_diff(PROJECT_ID)
+    assert diff is not None
+    assert hasattr(diff, "github_archived_changed_count"), (
+        "BUG-P1A-2: EcosystemIndexDiff must have github_archived_changed_count field"
+    )
+    assert hasattr(diff, "removed_from_query_count"), (
+        "BUG-P1A-2: EcosystemIndexDiff must have removed_from_query_count field"
+    )
+    # Values are integers (0 is valid for a first scan with all new repos)
+    assert isinstance(diff.github_archived_changed_count, int)
+    assert isinstance(diff.removed_from_query_count, int)
+
+    # API response must also expose new field names
+    diff_resp = body["diff"]
+    assert "github_archived_changed_count" in diff_resp
+    assert "removed_from_query_count" in diff_resp
+
+
 @pytest.mark.asyncio
 async def test_dry_run_false_writes_profiles(
     client: AsyncClient,
@@ -573,7 +686,8 @@ async def test_dry_run_false_writes_profiles(
     """dry_run=False must upsert repos into ecosystem_repo_profiles."""
     await _setup_quick(client, queries=["topic:mcp"])
 
-    mock_repos = [_fake_repo("writeA", stars=3000), _fake_repo("writeB", stars=2000)]
+    # Stars >= 5000 required for P1.A popularity_floor
+    mock_repos = [_fake_repo("writeA", stars=6000), _fake_repo("writeB", stars=5500)]
     gh_auth_ok = MagicMock(returncode=0)
 
     profiles_before, _ = await repo.search_ecosystem_profiles_extended(limit=500, offset=0)

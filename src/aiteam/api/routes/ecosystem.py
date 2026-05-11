@@ -33,32 +33,18 @@ from aiteam.types import (
     EcosystemTagCategory,
 )
 
-# Default ScanProfile template — used when no profile has been configured
+# Default ScanProfile template — used when no profile has been configured.
+# v1.6.0-P1.A: stars is admission gate only; once admitted repos are permanent.
+# Removed: active_definition / inactive_signals / archive_signals (no inactivity eviction).
 _DEFAULT_SCAN_PROFILE: dict = {
-    "active_definition": {
-        "primary_metric_kind": "popularity_rank",
-        "active_top_n_per_source": 200,
-        "min_popularity_floor": {
-            "github": 1000,
-            "huggingface": 500,
-            "npm": 1000,
-            "pypi": 1000,
-            "hackernews": 100,
-            "producthunt": 50,
-            "arxiv": 10,
-        },
-    },
-    "inactive_signals": {
-        "no_activity_days": 180,
-        "rank_drop_to_below": 500,
-    },
-    "archive_signals": {
-        "no_activity_days": 730,
-        "source_archived": True,
+    "popularity_floor": {
+        "github": 5000,
+        "huggingface": 1000,
+        "npm": 5000,
+        "pypi": 5000,
     },
     "alert_thresholds": {
         "max_new_per_scan": 50,
-        "max_archived_per_scan": 30,
     },
 }
 
@@ -84,6 +70,16 @@ class EcosystemProfileCreate(BaseModel):
     is_archived: bool = False
     scan_run_id: str | None = None
     description_excerpt: str = ""
+
+
+def _make_summary_excerpt(text: str | None, max_chars: int = 150) -> str:
+    """Truncate long text to excerpt for list endpoints (P1.B layered return)."""
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -156,7 +152,7 @@ def _profile_to_dict(
         "pushed_at": p.pushed_at.isoformat() if p.pushed_at else None,
         "is_archived": p.is_archived,
         "scan_run_id": p.scan_run_id,
-        "description_excerpt": p.description_excerpt,
+        "description_excerpt": _make_summary_excerpt(p.description_excerpt, 150) if p.description_excerpt else None,
         # v1.5.0-A 新增字段（前端 stage 徽章 / 失败提示 / 活跃集 tab 依赖）
         "shallow_summary": p.shallow_summary,
         "last_shallow_refreshed_at": (
@@ -173,6 +169,41 @@ def _profile_to_dict(
         # v1.5.1 新增：透出渐进漏斗 stage 状态 + 研究次数（让前端徽章渲染 + 总数统计准确）
         "stage_status": stage_status or "queued",
         "research_count": research_count,
+        # v1.6.0-P1.A manual status fields
+        "last_active_status": p.last_active_status,
+        "manual_status": p.manual_status,
+    }
+
+
+def _profile_to_list_dict(
+    p: EcosystemRepoProfile,
+    stage_status: str | None = None,
+    research_count: int = 0,
+) -> dict[str, Any]:
+    """P1.B layered return: summary-only fields for list endpoints.
+
+    Omits shallow_summary (long text) and other large fields.
+    Use _profile_to_dict for full detail.
+    """
+    return {
+        "id": p.id,
+        "repo_full_name": p.repo_full_name,
+        "name": p.name,
+        "stars": p.stars,
+        "language": p.language,
+        "relevance_category": p.relevance_category,
+        "one_line_summary": p.one_line_summary,
+        "description_excerpt": _make_summary_excerpt(p.description, 150),
+        "is_archived": p.is_archived,
+        "last_active_status": p.last_active_status,
+        "manual_status": p.manual_status,
+        "canonical_id": p.canonical_id,
+        "source_kind": p.source_kind,
+        "last_scanned_at": p.last_scanned_at.isoformat(),
+        "pushed_at": p.pushed_at.isoformat() if p.pushed_at else None,
+        "stage_status": stage_status or "queued",
+        "research_count": research_count,
+        "needs_deep_review": p.needs_deep_review,
     }
 
 
@@ -250,13 +281,15 @@ async def search_profiles(
     tags: str = Query(default=""),
     tag_match_mode: str = Query(default="all"),
     sort: str = Query(default="stars"),
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=20, le=100),
     offset: int = Query(default=0, ge=0),
     facet_counts: bool = Query(default=False),
     # v1.5.0-E 前端 tab 切换 / failed 筛选依赖（service 层若不识别会忽略）
     is_active: bool | None = Query(default=None),
     is_deleted: bool | None = Query(default=None),
     stage_status: str = Query(default=""),
+    # P1.B: detail=true returns full fields (shallow_summary etc); default is summary-only
+    detail: bool = Query(default=False),
     repo: StorageRepository = Depends(get_scoped_repository),
 ) -> dict[str, Any]:
     """检索生态仓档案列表（Stage E 扩展版）。
@@ -265,6 +298,8 @@ async def search_profiles(
     - sort: stars / recency (pushed_at desc) / relevance (relevance_score desc)
     - facet_counts: True 时附带 category/language/archived 聚合分布
     - is_active / is_deleted / stage_status: v1.5.0-E 前端筛选（活跃/全量 tab、failed 筛选）
+    - detail=false (default): 返回摘要字段（P1.B 分层返回，不含 shallow_summary 长文本）
+    - detail=true: 返回完整字段（含 shallow_summary）
     """
     pushed_after_dt = _parse_dt(pushed_after) if pushed_after else None
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
@@ -336,9 +371,11 @@ async def search_profiles(
     if is_active is not None or is_deleted is not None:
         total = len(profiles)
 
+    # P1.B: use summary-only serializer by default; full fields only when detail=True
+    _serialize_fn = _profile_to_dict if detail else _profile_to_list_dict
     payload: dict[str, Any] = {
         "profiles": [
-            _profile_to_dict(
+            _serialize_fn(
                 p,
                 stage_status=stage_map.get(p.id, "queued"),
                 research_count=count_map.get(p.id, 0),
@@ -348,6 +385,7 @@ async def search_profiles(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "has_more": (offset + limit) < total,
     }
 
     if facet_counts:
@@ -393,6 +431,64 @@ async def get_profile_full(
         raise HTTPException(status_code=404, detail="ecosystem repo not found")
 
     return _serialize_full(result)
+
+
+class ManualStatusBody(BaseModel):
+    """Request body for setting manual status on a repo."""
+
+    status: str | None = None  # 'no_value' to mark; null/None to clear
+    reason: str = ""
+    set_by: str = "user"
+
+
+@router.post("/repos/{repo_id}/manual_status")
+async def set_repo_manual_status(
+    repo_id: str,
+    body: ManualStatusBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Set or clear manual status on a repo (e.g. mark as no_value after deep review).
+
+    POST body: {status: 'no_value', reason: 'low quality content', set_by: 'user'}
+    To clear: {status: null, reason: ''}
+
+    When status='no_value', the repo's last_active_status will reflect 'manual_archived'
+    on the next index_update run.
+    """
+    # Validate status value
+    allowed = {None, "no_value"}
+    if body.status not in allowed:
+        raise HTTPException(status_code=400, detail=f"status must be one of: no_value, null. Got: {body.status!r}")
+
+    found = await repo.update_repo_manual_status(
+        repo_id=repo_id,
+        manual_status=body.status,
+        reason=body.reason,
+        set_by=body.set_by,
+    )
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Repo {repo_id} not found")
+
+    # If setting no_value, also update last_active_status immediately
+    if body.status == "no_value":
+        await repo.update_repo_active_status(repo_id, new_status="manual_archived")
+    elif body.status is None:
+        # Clearing manual status — restore to 'active' unless github archived
+        profile = await repo.get_ecosystem_profile_by_id(repo_id)
+        if profile and not profile.is_archived:
+            await repo.update_repo_active_status(repo_id, new_status="active")
+
+    return {
+        "success": True,
+        "repo_id": repo_id,
+        "manual_status": body.status,
+        "reason": body.reason,
+        "set_by": body.set_by,
+        "message": (
+            f"Marked as no_value: {body.reason}" if body.status == "no_value"
+            else "Manual status cleared"
+        ),
+    }
 
 
 @router.get("/search/by_capability")
@@ -2040,14 +2136,21 @@ async def create_data_source(
 
 @router.get("/data_sources")
 async def list_data_sources(
+    limit: int = Query(default=50, le=100),
+    offset: int = Query(default=0, ge=0),
     repo: StorageRepository = Depends(get_scoped_repository),
 ) -> dict[str, Any]:
-    """List all data sources for the current project."""
+    """List all data sources for the current project (P1.B: paginated, config truncated).
+
+    config field returns only top-level keys (not full JSON) to prevent token explosion.
+    Use GET /data_sources/{id} for full config.
+    """
     project_id = repo._project_scope
     if not project_id:
         raise HTTPException(status_code=400, detail="X-Project-Id header required")
 
     sources = await repo.list_data_sources(project_id)
+    paged = sources[offset: offset + limit]
     return {
         "success": True,
         "data_sources": [
@@ -2056,14 +2159,19 @@ async def list_data_sources(
                 "project_id": ds.project_id,
                 "kind": ds.kind.value,
                 "name": ds.name,
-                "config": ds.config,
+                # P1.B: return only config key names, not full JSON
+                "config_keys": list((ds.config or {}).keys()),
+                "queries_count": len((ds.config or {}).get("queries", [])),
                 "enabled": ds.enabled,
                 "version": ds.version,
                 "created_at": ds.created_at.isoformat(),
             }
-            for ds in sources
+            for ds in paged
         ],
         "total": len(sources),
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < len(sources),
     }
 
 
@@ -2299,17 +2407,17 @@ async def index_update(
 
     # ── Step 3b: run scanner for each github data_source ─────────────────────
     profile_def = profile.profile
-    active_def = profile_def.get("active_definition", {})
-    inactive_signals = profile_def.get("inactive_signals", {})
-    archive_signals = profile_def.get("archive_signals", {})
-    alert_thresholds = profile_def.get("alert_thresholds", {})
+    # v1.6.0-P1.A: simplified profile — stars is gate only, no inactivity signals.
+    # Support both old-style (active_definition.min_popularity_floor) and
+    # new-style (popularity_floor) for backwards compatibility.
+    _old_active_def = profile_def.get("active_definition", {})
+    _old_min_floor = _old_active_def.get("min_popularity_floor", {})
+    _new_floor = profile_def.get("popularity_floor", {})
+    # New style takes precedence; fall back to old style for legacy profiles
+    min_stars_by_source: dict = _new_floor if _new_floor else _old_min_floor
 
-    min_stars_by_source = active_def.get("min_popularity_floor", {})
-    active_top_n = active_def.get("active_top_n_per_source", 200)
-    inactive_no_activity_days = inactive_signals.get("no_activity_days", 180)
-    archive_no_activity_days = archive_signals.get("no_activity_days", 730)
+    alert_thresholds = profile_def.get("alert_thresholds", {})
     max_new_per_scan = alert_thresholds.get("max_new_per_scan", 50)
-    max_archived_per_scan = alert_thresholds.get("max_archived_per_scan", 30)
 
     # Collect all fresh repo dicts from all github sources (deduplicated by repo_full_name)
     now = datetime.now(tz=timezone.utc)
@@ -2365,162 +2473,96 @@ async def index_update(
             except Exception:
                 pass
 
-    # ── Step 4+5: compute NormalizedSignal + classify active status ────────────
+    # ── Step 4: classify active status (P1.A simplified) ──────────────────────
+    # Stars-only gate: repos in all_fresh already passed min_stars filter.
+    # Status logic: github_archived=True → archived; manual_status='no_value' → manual_archived
+    # Everything else → active (permanent; no rank eviction, no pushed_at stale).
     total = len(all_fresh)
-    # Sort by stars desc to assign ranks
-    sorted_repos = sorted(
-        all_fresh.items(),
-        key=lambda kv: kv[1].get("stars", 0),
-        reverse=True,
-    )
+    min_stars_gh = min_stars_by_source.get("github", 5000)
 
-    # repo_full_name → (rank, percentile, activity_score, computed_status)
-    fresh_signals: dict[str, tuple[int, float, float, str]] = {}
-    for rank_0, (fn, repo_data) in enumerate(sorted_repos):
-        rank = rank_0 + 1
-        percentile = 1.0 - (rank - 1) / max(total, 1)
-
-        pushed_at = repo_data.get("pushed_at")
-        if isinstance(pushed_at, str):
-            try:
-                pushed_at = datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
-            except ValueError:
-                pushed_at = None
-
-        if pushed_at is not None:
-            age_days = (now - (pushed_at if pushed_at.tzinfo else pushed_at.replace(tzinfo=timezone.utc))).days
-        else:
-            age_days = 9999
-
-        if age_days <= 30:
-            freshness = 1.0
-        elif age_days <= 90:
-            freshness = 0.7
-        elif age_days <= 365:
-            freshness = 0.4
-        else:
-            freshness = 0.1
-
-        activity_score = percentile * freshness
-
-        # Determine active_status
+    # repo_full_name → computed_status
+    fresh_statuses: dict[str, str] = {}
+    for fn, repo_data in all_fresh.items():
         stars = repo_data.get("stars", 0)
-        min_floor = min_stars_by_source.get("github", 1000)
-        if stars < min_floor:
-            computed_status = "not_collected"
-        elif rank > active_top_n:
-            computed_status = "inactive"
-        elif age_days > archive_no_activity_days or repo_data.get("is_archived", False):
-            computed_status = "archived"
-        elif age_days > inactive_no_activity_days:
-            computed_status = "stale"
+        if stars < min_stars_gh:
+            # fetcher should have pre-filtered, but guard here
+            fresh_statuses[fn] = "not_collected"
+            continue
+        if repo_data.get("is_archived", False):
+            fresh_statuses[fn] = "archived"
         else:
-            computed_status = "active"
+            fresh_statuses[fn] = "active"
 
-        fresh_signals[fn] = (rank, percentile, activity_score, computed_status)
-
-    # ── Step 6: diff against DB ───────────────────────────────────────────────
-    # Use pre-scan snapshot (captured before scanner upserted new repos) for
-    # correct new/reactivated classification.
+    # ── Step 5: diff against DB ───────────────────────────────────────────────
     existing_map = pre_scan_map
 
     new_repos: list[str] = []
-    reactivated_repos: list[str] = []
-    deactivated_repos: list[str] = []
-    stale_repos: list[str] = []
-    archived_repos: list[str] = []
+    updated_repos: list[str] = []
+    github_archived_changed: list[str] = []
+    removed_from_query: list[str] = []  # in DB but not in this scan — preserve, just log
     status_changes: list[EcosystemStatusChange] = []
-    scan_run_id = None  # will be set from last scanner run if available
+    scan_run_id = None
 
-    for fn, (rank, percentile, activity_score, computed_status) in fresh_signals.items():
+    for fn, computed_status in fresh_statuses.items():
         if computed_status == "not_collected":
             continue
         existing = existing_map.get(fn)
-        prev_status = (existing.last_active_status if existing else None) if existing else None
 
         if existing is None:
+            # Truly new repo
             new_repos.append(fn)
             if not body.dry_run:
-                # Lookup to get the repo_id after scanner upserted it
                 upserted = await repo.get_ecosystem_profile(fn, project_id=project_id)
                 if upserted:
-                    await repo.update_repo_active_status(
-                        upserted.id,
-                        new_status=computed_status,
-                        popularity_percentile=percentile,
-                        activity_score=activity_score,
-                        active_rank=rank,
-                    )
+                    # Determine effective status: manual_status takes priority
+                    if upserted.manual_status == "no_value":
+                        effective_status = "manual_archived"
+                    else:
+                        effective_status = computed_status
+                    await repo.update_repo_active_status(upserted.id, new_status=effective_status)
                     status_changes.append(EcosystemStatusChange(
                         repo_id=upserted.id,
                         project_id=project_id,
                         from_status=None,
-                        to_status=computed_status,
+                        to_status=effective_status,
                         reason="new_repo",
                     ))
         else:
-            repo_id = existing.id
-            if computed_status != prev_status and prev_status is not None:
-                if computed_status == "active" and prev_status in ("inactive", "stale"):
-                    reactivated_repos.append(fn)
-                    reason = "reactivated"
-                elif computed_status in ("inactive",) and prev_status == "active":
-                    deactivated_repos.append(fn)
-                    reason = "rank_drop"
-                elif computed_status == "stale":
-                    stale_repos.append(fn)
-                    reason = "no_activity"
-                elif computed_status == "archived":
-                    archived_repos.append(fn)
-                    reason = "archive_signals"
-                else:
-                    reason = "status_change"
+            updated_repos.append(fn)
+            prev_status = existing.last_active_status
 
+            # Determine effective status
+            if existing.manual_status == "no_value":
+                effective_status = "manual_archived"
+            else:
+                effective_status = computed_status
+
+            # Track GitHub archived status changes
+            if effective_status == "archived" and prev_status != "archived":
+                github_archived_changed.append(fn)
+            elif effective_status != "archived" and prev_status == "archived":
+                github_archived_changed.append(fn)  # unarchived
+
+            if effective_status != prev_status:
                 if not body.dry_run:
-                    await repo.update_repo_active_status(
-                        repo_id,
-                        new_status=computed_status,
-                        popularity_percentile=percentile,
-                        activity_score=activity_score,
-                        active_rank=rank,
-                    )
+                    await repo.update_repo_active_status(existing.id, new_status=effective_status)
                     status_changes.append(EcosystemStatusChange(
-                        repo_id=repo_id,
+                        repo_id=existing.id,
                         project_id=project_id,
                         from_status=prev_status,
-                        to_status=computed_status,
-                        reason=reason,
+                        to_status=effective_status,
+                        reason="github_archived_change" if "archived" in (effective_status, prev_status or "")
+                               else "status_change",
                     ))
-            else:
-                # Update signal fields even if status unchanged
-                if not body.dry_run:
-                    await repo.update_repo_active_status(
-                        repo_id,
-                        new_status=computed_status or "active",
-                        popularity_percentile=percentile,
-                        activity_score=activity_score,
-                        active_rank=rank,
-                    )
 
-    # Repos in DB but absent from fresh scan → deactivate
-    fresh_fn_set = set(fresh_signals.keys())
+    # Repos in DB but absent from this scan → preserve status permanently (P1.A)
+    fresh_fn_set = set(fn for fn, s in fresh_statuses.items() if s != "not_collected")
     for fn, existing in existing_map.items():
-        if fn not in fresh_fn_set and existing.last_active_status != "inactive":
-            deactivated_repos.append(fn)
-            if not body.dry_run:
-                await repo.update_repo_active_status(
-                    existing.id,
-                    new_status="inactive",
-                )
-                status_changes.append(EcosystemStatusChange(
-                    repo_id=existing.id,
-                    project_id=project_id,
-                    from_status=existing.last_active_status,
-                    to_status="inactive",
-                    reason="missing_from_scan",
-                ))
+        if fn not in fresh_fn_set:
+            removed_from_query.append(fn)
+            # No status change — repos are permanent once admitted
 
-    # ── Step 7: check alert thresholds ────────────────────────────────────────
+    # ── Step 6: check alert thresholds ────────────────────────────────────────
     alerted = False
     alert_message = ""
     if len(new_repos) > max_new_per_scan:
@@ -2529,29 +2571,22 @@ async def index_update(
             f"Alert: {len(new_repos)} new repos exceeds max_new_per_scan={max_new_per_scan}. "
             "No changes committed. Adjust scan_profile or confirm via dry_run=False with raised threshold."
         )
-    if len(archived_repos) > max_archived_per_scan:
-        alerted = True
-        alert_message = (
-            f"Alert: {len(archived_repos)} archived repos exceeds max_archived_per_scan={max_archived_per_scan}. "
-            "No changes committed. Review scan_profile archive_signals thresholds."
-        )
 
     if alerted:
-        # Build diff summary without writing to DB
         diff = EcosystemIndexDiff(
             project_id=project_id,
             diff_type="incremental",
             new_count=len(new_repos),
-            reactivated_count=len(reactivated_repos),
-            deactivated_count=len(deactivated_repos),
-            stale_count=len(stale_repos),
-            archived_count=len(archived_repos),
+            reactivated_count=0,
+            deactivated_count=0,
+            stale_count=0,
+            archived_count=0,
+            github_archived_changed_count=len(github_archived_changed),
+            removed_from_query_count=len(removed_from_query),
             details_json={
                 "new": new_repos[:50],
-                "reactivated": reactivated_repos[:50],
-                "deactivated": deactivated_repos[:50],
-                "stale": stale_repos[:50],
-                "archived": archived_repos[:50],
+                "github_archived_changed": github_archived_changed[:50],
+                "removed_from_query": removed_from_query[:50],
             },
             markdown_summary=alert_message,
             alerted=True,
@@ -2559,26 +2594,23 @@ async def index_update(
         if not body.dry_run:
             await repo.create_index_diff(diff)
         return {
-            "success": True,  # call completed successfully; alerted=True signals threshold breach
+            "success": True,
             "dry_run": body.dry_run,
             "alerted": True,
             "message": alert_message,
             "diff": {
                 "new_count": diff.new_count,
-                "reactivated_count": diff.reactivated_count,
-                "deactivated_count": diff.deactivated_count,
-                "stale_count": diff.stale_count,
-                "archived_count": diff.archived_count,
+                "updated_count": len(updated_repos),
+                "github_archived_changed_count": diff.github_archived_changed_count,
+                "removed_from_query_count": diff.removed_from_query_count,
             },
         }
 
-    # ── Step 8: persist diff + status changes (dry_run=False only) ────────────
-    markdown_summary = _build_diff_markdown(
+    # ── Step 7: persist diff + status changes (dry_run=False only) ────────────
+    markdown_summary = _build_diff_markdown_p1(
         new_repos=new_repos,
-        reactivated_repos=reactivated_repos,
-        deactivated_repos=deactivated_repos,
-        stale_repos=stale_repos,
-        archived_repos=archived_repos,
+        github_archived_changed=github_archived_changed,
+        removed_from_query=removed_from_query,
         dry_run=body.dry_run,
         total_scanned=total,
         scan_profile_version=profile.version,
@@ -2588,16 +2620,16 @@ async def index_update(
         project_id=project_id,
         diff_type="initial" if not existing_map else "incremental",
         new_count=len(new_repos),
-        reactivated_count=len(reactivated_repos),
-        deactivated_count=len(deactivated_repos),
-        stale_count=len(stale_repos),
-        archived_count=len(archived_repos),
+        reactivated_count=0,
+        deactivated_count=0,
+        stale_count=0,
+        archived_count=0,
+        github_archived_changed_count=len(github_archived_changed),
+        removed_from_query_count=len(removed_from_query),
         details_json={
             "new": new_repos[:200],
-            "reactivated": reactivated_repos[:200],
-            "deactivated": deactivated_repos[:200],
-            "stale": stale_repos[:200],
-            "archived": archived_repos[:200],
+            "github_archived_changed": github_archived_changed[:200],
+            "removed_from_query": removed_from_query[:200],
         },
         markdown_summary=markdown_summary,
         alerted=False,
@@ -2617,52 +2649,47 @@ async def index_update(
         "diff": {
             "id": diff.id,
             "new_count": diff.new_count,
-            "reactivated_count": diff.reactivated_count,
-            "deactivated_count": diff.deactivated_count,
-            "stale_count": diff.stale_count,
-            "archived_count": diff.archived_count,
+            "updated_count": len(updated_repos),
+            "github_archived_changed_count": diff.github_archived_changed_count,
+            "removed_from_query_count": diff.removed_from_query_count,
             "markdown_summary": diff.markdown_summary,
         },
         "message": (
             "Dry-run complete — no changes written." if body.dry_run
-            else f"Index updated: {diff.new_count} new, {diff.reactivated_count} reactivated, "
-                 f"{diff.deactivated_count} deactivated, {diff.stale_count} stale, {diff.archived_count} archived."
+            else f"Index updated: {diff.new_count} new, {len(updated_repos)} updated metadata, "
+                 f"{diff.archived_count} github_archived changes."
         ),
     }
 
 
-def _build_diff_markdown(
+def _build_diff_markdown_p1(
     new_repos: list[str],
-    reactivated_repos: list[str],
-    deactivated_repos: list[str],
-    stale_repos: list[str],
-    archived_repos: list[str],
+    github_archived_changed: list[str],
+    removed_from_query: list[str],
     dry_run: bool,
     total_scanned: int,
     scan_profile_version: int,
 ) -> str:
-    """Build a human-readable markdown summary of an index_update diff."""
+    """Build human-readable markdown summary for P1.A simplified diff."""
     mode = "Dry-run preview" if dry_run else "Index update"
     lines = [
         f"## {mode} — scan_profile v{scan_profile_version}",
-        f"",
-        f"Total repos scanned: **{total_scanned}**",
-        f"",
+        "",
+        f"Total repos in fresh scan: **{total_scanned}**",
+        "",
         f"| Category | Count |",
         f"|----------|-------|",
         f"| New | {len(new_repos)} |",
-        f"| Reactivated | {len(reactivated_repos)} |",
-        f"| Deactivated | {len(deactivated_repos)} |",
-        f"| Stale | {len(stale_repos)} |",
-        f"| Archived | {len(archived_repos)} |",
+        f"| GitHub archived status changed | {len(github_archived_changed)} |",
+        f"| Absent from this query (preserved) | {len(removed_from_query)} |",
     ]
     if new_repos:
         lines += ["", "### New repos (first 10)"]
         for fn in new_repos[:10]:
             lines.append(f"- {fn}")
-    if deactivated_repos:
-        lines += ["", "### Deactivated repos (first 10)"]
-        for fn in deactivated_repos[:10]:
+    if github_archived_changed:
+        lines += ["", "### GitHub archived status changed (first 10)"]
+        for fn in github_archived_changed[:10]:
             lines.append(f"- {fn}")
     return "\n".join(lines)
 
@@ -2690,6 +2717,9 @@ async def get_latest_index_diff(
             "deactivated_count": diff.deactivated_count,
             "stale_count": diff.stale_count,
             "archived_count": diff.archived_count,
+            # new fields (P1 hotfix): read new columns, fallback to old for pre-hotfix rows
+            "github_archived_changed_count": diff.github_archived_changed_count or diff.archived_count,
+            "removed_from_query_count": diff.removed_from_query_count,
             "markdown_summary": diff.markdown_summary,
             "alerted": diff.alerted,
             "generated_at": diff.generated_at.isoformat(),
@@ -2699,15 +2729,24 @@ async def get_latest_index_diff(
 
 @router.get("/index_diffs/history")
 async def get_index_diff_history(
-    limit: int = Query(default=10, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=20),
     repo: StorageRepository = Depends(get_scoped_repository),
 ) -> dict[str, Any]:
-    """Return recent index diffs for the current project."""
+    """Return recent index diffs for the current project (P1.B: details truncated to first 5).
+
+    Full details_json available in /index_diffs/latest.
+    """
     project_id = repo._project_scope
     if not project_id:
         raise HTTPException(status_code=400, detail="X-Project-Id header required")
 
     diffs = await repo.list_index_diffs(project_id, limit=limit)
+
+    def _truncate_details(details: dict | None) -> dict:
+        if not details:
+            return {}
+        return {k: v[:5] if isinstance(v, list) else v for k, v in details.items()}
+
     return {
         "success": True,
         "diffs": [
@@ -2721,6 +2760,8 @@ async def get_index_diff_history(
                 "archived_count": d.archived_count,
                 "alerted": d.alerted,
                 "generated_at": d.generated_at.isoformat(),
+                # P1.B: only first 5 items per category to prevent token explosion
+                "details_summary": _truncate_details(d.details_json),
             }
             for d in diffs
         ],

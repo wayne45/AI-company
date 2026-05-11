@@ -537,10 +537,15 @@ class EcosystemRepoProfile(BaseModel):
     # v1.6.0-P0.4: NormalizedSignal fields (written by index_update)
     canonical_id: str | None = None  # "github/owner/repo" cross-source dedup key
     source_kind: str = "github"  # which data source produced this profile
-    last_active_status: str | None = None  # 'active'|'inactive'|'stale'|'archived'
+    last_active_status: str | None = None  # 'active'|'inactive'|'archived'|'manual_archived'
     last_status_change_at: datetime | None = None  # when last_active_status last changed
     popularity_percentile: float | None = None  # 0-1, 1.0 = top of scan results
     activity_score: float | None = None  # 0-1 composite freshness * popularity
+    # v1.6.0-P1.A: human-flagged manual status
+    manual_status: str | None = None  # 'no_value' | null
+    manual_status_reason: str | None = None
+    manual_status_set_at: datetime | None = None
+    manual_status_set_by: str | None = None
 
 
 # ============================================================
@@ -863,7 +868,10 @@ class EcosystemIndexDiff(BaseModel):
     reactivated_count: int = 0
     deactivated_count: int = 0
     stale_count: int = 0
-    archived_count: int = 0
+    archived_count: int = 0  # deprecated: kept for backward compat, use github_archived_changed_count
+    # v1.6.0-P1 hotfix: new semantically-correct column names
+    github_archived_changed_count: int = 0
+    removed_from_query_count: int = 0
     details_json: dict[str, Any] = Field(default_factory=dict)
     markdown_summary: str = ""
     alerted: bool = False

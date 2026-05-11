@@ -87,14 +87,25 @@ def _should_exclude(repo_full_name: str) -> bool:
 
 def _run_gh_search(
     keyword: str,
-    min_stars: int,
+    min_stars: int = 5000,
     topics: list[str] | None = None,
+    limit: int = 100,
     timeout: int = 30,
 ) -> list[dict[str, Any]]:
-    """Call gh search repos and return parsed repo list."""
+    """Call gh search repos and return parsed repo list.
+
+    Args:
+        keyword: Search keyword injected into query string.
+        min_stars: Minimum stars threshold — acts as admission gate.
+                   Defaults to 5000 (P1.A popularity_floor).
+        topics: Optional list of GitHub topics to filter by.
+        limit: Max results per query (gh --limit). Defaults to 100, max 1000.
+        timeout: Subprocess timeout in seconds.
+    """
+    effective_limit = min(max(1, limit), 1000)  # gh max is 1000
     cmd = [
         "gh", "search", "repos",
-        "--limit=100",
+        f"--limit={effective_limit}",
         f"--stars=>={min_stars}",
         f"--json={_GH_JSON_FIELDS}",
         "--sort=stars",
@@ -1902,4 +1913,52 @@ def register(mcp: Any) -> None:
                     "error": "P0.4 will implement",
                     "detail": result.get("detail", ""),
                 }
+        return result
+
+    @mcp.tool()
+    def ecosystem_mark_no_value(repo_id: str, reason: str = "", project_id: str = "") -> dict[str, Any]:
+        """Mark a repo as no_value (manual_archived) after deep review shows it has low value.
+
+        Sets manual_status='no_value' on the repo, immediately changes last_active_status
+        to 'manual_archived', and records reason + who set it.
+
+        Args:
+            repo_id: EcosystemRepoProfile.id of the target repo.
+            reason: Short explanation why this repo has no value (stored for audit).
+            project_id: Optional project scope override.
+
+        Returns:
+            {success, repo_id, manual_status, reason, message}
+        """
+        result = _api_call(
+            "POST",
+            f"/api/ecosystem/repos/{repo_id}/manual_status",
+            {"status": "no_value", "reason": reason, "set_by": "ecosystem_mark_no_value"},
+            extra_headers=_project_headers(project_id),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_clear_manual_status(repo_id: str, project_id: str = "") -> dict[str, Any]:
+        """Clear manual_status on a repo (undo ecosystem_mark_no_value).
+
+        Restores last_active_status to 'active' (unless repo is GitHub-archived).
+
+        Args:
+            repo_id: EcosystemRepoProfile.id of the target repo.
+            project_id: Optional project scope override.
+
+        Returns:
+            {success, repo_id, manual_status, message}
+        """
+        result = _api_call(
+            "POST",
+            f"/api/ecosystem/repos/{repo_id}/manual_status",
+            {"status": None, "reason": "", "set_by": "ecosystem_clear_manual_status"},
+            extra_headers=_project_headers(project_id),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
         return result

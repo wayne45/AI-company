@@ -413,12 +413,13 @@ class EcosystemScanner:
         description = repo_data.get("description")
         excerpt = (description or "")[:280]
 
+        repo_full_name = repo_data["repo_full_name"]
         kwargs: dict[str, Any] = {}
         if existing is not None:
             kwargs["id"] = existing.id
         return EcosystemRepoProfile(
             **kwargs,
-            repo_full_name=repo_data["repo_full_name"],
+            repo_full_name=repo_full_name,
             name=repo_data.get("name", ""),
             owner=repo_data.get("owner", ""),
             description=description,
@@ -437,6 +438,8 @@ class EcosystemScanner:
             one_line_summary=repo_data.get("one_line_summary") or excerpt[:200] or None,
             first_seen_at=first_seen_at,
             last_scanned_at=now,
+            canonical_id=existing.canonical_id if existing and existing.canonical_id else f"github/{repo_full_name}",
+            source_kind=existing.source_kind if existing and existing.source_kind else "github",
         )
 
 

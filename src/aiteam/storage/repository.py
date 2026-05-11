@@ -4089,3 +4089,28 @@ class StorageRepository:
                 .where(EcosystemRepoProfileModel.id == repo_id)
                 .values(**values)
             )
+
+    async def update_repo_manual_status(
+        self,
+        repo_id: str,
+        manual_status: str | None,
+        reason: str = "",
+        set_by: str = "user",
+    ) -> bool:
+        """Set or clear manual_status on a repo profile. Returns True if row found."""
+        from sqlalchemy import update as sa_update
+
+        now = datetime.now(tz=timezone.utc)
+        values: dict = {
+            "manual_status": manual_status,
+            "manual_status_reason": reason if manual_status else None,
+            "manual_status_set_at": now if manual_status else None,
+            "manual_status_set_by": set_by if manual_status else None,
+        }
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                sa_update(EcosystemRepoProfileModel)
+                .where(EcosystemRepoProfileModel.id == repo_id)
+                .values(**values)
+            )
+            return result.rowcount > 0

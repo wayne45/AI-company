@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from aiteam.api.deps import get_event_bus, get_manager, get_repository
 from aiteam.api.event_bus import EventBus
@@ -19,15 +19,24 @@ router = APIRouter(tags=["agents"])
 
 @router.get(
     "/api/teams/{team_id}/agents",
-    response_model=APIListResponse[Agent],
 )
 async def list_agents(
     team_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     manager: TeamManager = Depends(get_manager),
-) -> APIListResponse[Agent]:
-    """List all Agents in a team."""
-    agents = await manager.list_agents(team_id)
-    return APIListResponse(data=agents, total=len(agents))
+) -> dict[str, Any]:
+    """List Agents in a team (P1.B: paginated to prevent 254-agent token explosion)."""
+    all_agents = await manager.list_agents(team_id)
+    paged = all_agents[offset: offset + limit]
+    return {
+        "success": True,
+        "data": [a.model_dump() if hasattr(a, "model_dump") else dict(a) for a in paged],
+        "total": len(all_agents),
+        "limit": limit,
+        "offset": offset,
+        "has_more": (offset + limit) < len(all_agents),
+    }
 
 
 @router.post(
