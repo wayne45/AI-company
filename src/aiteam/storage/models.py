@@ -29,9 +29,12 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    DataSource,
+    DataSourceKind,
     DemoResult,
     EcosystemDeepReview,
     EcosystemDeepReviewStatus,
+    EcosystemIndexDiff,
     EcosystemProjectSettings,
     EcosystemRelation,
     EcosystemRelationType,
@@ -41,6 +44,7 @@ from aiteam.types import (
     EcosystemScanRun,
     EcosystemScanStrategy,
     EcosystemStageStatus,
+    EcosystemStatusChange,
     EcosystemTag,
     EcosystemTagCategory,
     EcosystemTagSource,
@@ -61,6 +65,7 @@ from aiteam.types import (
     Report,
     ScheduledTask,
     StageTransition,
+    ScanProfile,
     Task,
     TaskHorizon,
     TaskPriority,
@@ -1013,6 +1018,14 @@ class EcosystemRepoProfileModel(Base):
     fetch_failure_count: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     active_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # v1.6.0-P0 fields (also in COLUMNS_TO_ENSURE for existing file-based DBs)
+    canonical_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_kind: Mapped[str] = mapped_column(String(20), default="github")
+    last_active_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_status_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v1.6.0-P0.4 NormalizedSignal fields
+    popularity_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
+    activity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     def to_pydantic(self) -> EcosystemRepoProfile:
         """Convert to Pydantic model."""
@@ -1055,6 +1068,12 @@ class EcosystemRepoProfileModel(Base):
             fetch_failure_count=self.fetch_failure_count or 0,
             is_active=bool(self.is_active) if self.is_active is not None else True,
             active_rank=self.active_rank,
+            canonical_id=self.canonical_id,
+            source_kind=self.source_kind or "github",
+            last_active_status=self.last_active_status,
+            last_status_change_at=self.last_status_change_at,
+            popularity_percentile=self.popularity_percentile,
+            activity_score=self.activity_score,
         )
 
     @classmethod
@@ -1092,6 +1111,12 @@ class EcosystemRepoProfileModel(Base):
             fetch_failure_count=p.fetch_failure_count or 0,
             is_active=p.is_active,
             active_rank=p.active_rank,
+            canonical_id=p.canonical_id,
+            source_kind=p.source_kind or "github",
+            last_active_status=p.last_active_status,
+            last_status_change_at=p.last_status_change_at,
+            popularity_percentile=p.popularity_percentile,
+            activity_score=p.activity_score,
         )
 
 
@@ -1140,6 +1165,13 @@ class EcosystemDeepReviewModel(Base):
     stage3_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     debate_meeting_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     integration_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # v1.5.3: worker pool claim 字段
+    claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     def to_pydantic(self) -> EcosystemDeepReview:
         """Convert to Pydantic model."""
@@ -1174,6 +1206,12 @@ class EcosystemDeepReviewModel(Base):
             stage3_completed_at=self.stage3_completed_at,
             debate_meeting_id=self.debate_meeting_id,
             integration_task_id=self.integration_task_id,
+            claimed_by=self.claimed_by,
+            claimed_at=self.claimed_at,
+            quality_score=self.quality_score,
+            quality_notes=self.quality_notes,
+            reviewed_by=self.reviewed_by,
+            reviewed_at=self.reviewed_at,
         )
 
     @classmethod
@@ -1208,6 +1246,12 @@ class EcosystemDeepReviewModel(Base):
             stage3_completed_at=p.stage3_completed_at,
             debate_meeting_id=p.debate_meeting_id,
             integration_task_id=p.integration_task_id,
+            claimed_by=p.claimed_by,
+            claimed_at=p.claimed_at,
+            quality_score=p.quality_score,
+            quality_notes=p.quality_notes,
+            reviewed_by=p.reviewed_by,
+            reviewed_at=p.reviewed_at,
         )
 
 
@@ -1551,4 +1595,211 @@ class EcosystemProjectSettingsModel(Base):
             deep_concurrency=p.deep_concurrency,
             created_at=p.created_at,
             updated_at=p.updated_at,
+        )
+
+
+# ============================================================
+# v1.6.0 P0: Multi-source data source + scan profile tables
+# ============================================================
+
+
+class EcosystemDataSourceModel(Base):
+    """Data source configurations — one project can have multiple sources."""
+
+    __tablename__ = "ecosystem_data_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    config_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> DataSource:
+        return DataSource(
+            id=self.id,
+            project_id=self.project_id,
+            kind=DataSourceKind(self.kind),
+            name=self.name,
+            config=self.config_json or {},
+            enabled=self.enabled,
+            version=self.version or 1,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, ds: DataSource) -> "EcosystemDataSourceModel":
+        return cls(
+            id=ds.id,
+            project_id=ds.project_id,
+            kind=ds.kind.value,
+            name=ds.name,
+            config_json=ds.config,
+            enabled=ds.enabled,
+            version=ds.version,
+            created_at=ds.created_at,
+            updated_at=ds.updated_at,
+        )
+
+
+class EcosystemScanProfileModel(Base):
+    """Scan profile — versioned config for active/inactive/archive thresholds.
+
+    Each project has at most one is_active=True row; older versions are kept for history.
+    """
+
+    __tablename__ = "ecosystem_scan_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    def to_pydantic(self) -> ScanProfile:
+        return ScanProfile(
+            id=self.id,
+            project_id=self.project_id,
+            version=self.version or 1,
+            profile=self.profile_json or {},
+            is_active=self.is_active,
+            created_at=self.created_at,
+        )
+
+    @classmethod
+    def from_pydantic(cls, sp: ScanProfile) -> "EcosystemScanProfileModel":
+        return cls(
+            id=sp.id,
+            project_id=sp.project_id,
+            version=sp.version,
+            profile_json=sp.profile,
+            is_active=sp.is_active,
+            created_at=sp.created_at,
+        )
+
+
+# ============================================================
+# v1.6.0 P0.4: Index diff + status change tables
+# ============================================================
+
+
+class EcosystemIndexDiffModel(Base):
+    """Stores the diff output of each index_update run."""
+
+    __tablename__ = "ecosystem_index_diffs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scan_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    diff_type: Mapped[str] = mapped_column(String(20), default="incremental")
+    new_count: Mapped[int] = mapped_column(Integer, default=0)
+    reactivated_count: Mapped[int] = mapped_column(Integer, default=0)
+    deactivated_count: Mapped[int] = mapped_column(Integer, default=0)
+    stale_count: Mapped[int] = mapped_column(Integer, default=0)
+    archived_count: Mapped[int] = mapped_column(Integer, default=0)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    markdown_summary: Mapped[str] = mapped_column(Text, default="")
+    alerted: Mapped[bool] = mapped_column(Boolean, default=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    def to_pydantic(self) -> EcosystemIndexDiff:
+        import json
+
+        details = {}
+        if self.details_json:
+            try:
+                details = json.loads(self.details_json)
+            except Exception:
+                pass
+        return EcosystemIndexDiff(
+            id=self.id,
+            scan_run_id=self.scan_run_id,
+            project_id=self.project_id,
+            diff_type=self.diff_type,
+            new_count=self.new_count,
+            reactivated_count=self.reactivated_count,
+            deactivated_count=self.deactivated_count,
+            stale_count=self.stale_count,
+            archived_count=self.archived_count,
+            details_json=details,
+            markdown_summary=self.markdown_summary or "",
+            alerted=self.alerted or False,
+            generated_at=self.generated_at or datetime.now(timezone.utc),
+        )
+
+    @classmethod
+    def from_pydantic(cls, diff: EcosystemIndexDiff) -> "EcosystemIndexDiffModel":
+        import json
+
+        return cls(
+            id=diff.id,
+            scan_run_id=diff.scan_run_id,
+            project_id=diff.project_id,
+            diff_type=diff.diff_type,
+            new_count=diff.new_count,
+            reactivated_count=diff.reactivated_count,
+            deactivated_count=diff.deactivated_count,
+            stale_count=diff.stale_count,
+            archived_count=diff.archived_count,
+            details_json=json.dumps(diff.details_json),
+            markdown_summary=diff.markdown_summary,
+            alerted=diff.alerted,
+            generated_at=diff.generated_at,
+        )
+
+
+class EcosystemStatusChangeModel(Base):
+    """Tracks repo status transitions triggered by index_update runs."""
+
+    __tablename__ = "ecosystem_status_changes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repo_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    scan_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    def to_pydantic(self) -> EcosystemStatusChange:
+        return EcosystemStatusChange(
+            id=self.id,
+            repo_id=self.repo_id,
+            project_id=self.project_id,
+            from_status=self.from_status,
+            to_status=self.to_status,
+            scan_run_id=self.scan_run_id,
+            reason=self.reason or "",
+            triggered_at=self.triggered_at or datetime.now(timezone.utc),
+        )
+
+    @classmethod
+    def from_pydantic(cls, sc: EcosystemStatusChange) -> "EcosystemStatusChangeModel":
+        return cls(
+            id=sc.id,
+            repo_id=sc.repo_id,
+            project_id=sc.project_id,
+            from_status=sc.from_status,
+            to_status=sc.to_status,
+            scan_run_id=sc.scan_run_id,
+            reason=sc.reason,
+            triggered_at=sc.triggered_at,
         )

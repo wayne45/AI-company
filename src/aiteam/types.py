@@ -534,6 +534,13 @@ class EcosystemRepoProfile(BaseModel):
     fetch_failure_count: int = 0  # 累计失败次数
     is_active: bool = True  # 是否在当前项目活跃集（top_n by stars，动态计算 + 缓存）
     active_rank: int | None = None  # 当前项目内排名（按 stars，None=不在 top_n）
+    # v1.6.0-P0.4: NormalizedSignal fields (written by index_update)
+    canonical_id: str | None = None  # "github/owner/repo" cross-source dedup key
+    source_kind: str = "github"  # which data source produced this profile
+    last_active_status: str | None = None  # 'active'|'inactive'|'stale'|'archived'
+    last_status_change_at: datetime | None = None  # when last_active_status last changed
+    popularity_percentile: float | None = None  # 0-1, 1.0 = top of scan results
+    activity_score: float | None = None  # 0-1 composite freshness * popularity
 
 
 # ============================================================
@@ -628,6 +635,33 @@ class EcosystemScanStrategy(enum.StrEnum):
     TRENDING = "trending"
 
 
+# ============================================================
+# v1.6.0 P0: Multi-source data model types
+# ============================================================
+
+
+class DataSourceKind(enum.StrEnum):
+    """Supported ecosystem data source kinds."""
+
+    GITHUB = "github"
+    HUGGINGFACE = "huggingface"
+    NPM = "npm"
+    PYPI = "pypi"
+    HACKERNEWS = "hackernews"
+    PRODUCTHUNT = "producthunt"
+    ARXIV = "arxiv"
+    CUSTOM = "custom"
+
+
+class RepoActiveStatus(enum.StrEnum):
+    """Active status of a repo in the ecosystem index."""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    STALE = "stale"
+    ARCHIVED = "archived"
+
+
 class EcosystemDeepReview(BaseModel):
     """生态仓深扫报告 — 针对单个仓的结构化分析。
 
@@ -662,6 +696,13 @@ class EcosystemDeepReview(BaseModel):
     stage3_completed_at: datetime | None = None  # Stage 3 referenced/integrated 完成时间
     debate_meeting_id: str | None = None  # FK -> Meeting.id (Stage 2 触发会议)
     integration_task_id: str | None = None  # FK -> Task.id (Stage 3 integrate 派任务)
+    # v1.5.3: worker pool claim 字段
+    claimed_by: str | None = None  # worker_id 字符串，认领中则非 None
+    claimed_at: datetime | None = None  # 认领时间戳
+    quality_score: int | None = None  # 0-100 审查质量分
+    quality_notes: str | None = None  # 审查理由
+    reviewed_by: str | None = None  # 质量审查者 worker_id
+    reviewed_at: datetime | None = None  # 质量审查完成时间
 
 
 class EcosystemTag(BaseModel):
@@ -770,6 +811,76 @@ class EcosystemProjectSettings(BaseModel):
     deep_concurrency: int = 3
     created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+# ============================================================
+# v1.6.0 P0: Multi-source data model Pydantic types
+# ============================================================
+
+
+class NormalizedSignal(BaseModel):
+    """Cross-source normalized activity/popularity signal."""
+
+    popularity_rank: int = 0
+    popularity_percentile: float = 0.0  # 0-1, where 0.99 = top 1%
+    last_activity_at: datetime | None = None
+    activity_score: float = 0.0  # 0-1 composite score
+
+
+class DataSource(BaseModel):
+    """Ecosystem data source configuration (per-project, multi-source)."""
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str
+    kind: DataSourceKind
+    name: str
+    config: dict[str, Any] = Field(default_factory=dict)  # queries/filters/rate_limit
+    enabled: bool = True
+    version: int = 1
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class ScanProfile(BaseModel):
+    """Ecosystem scan profile — versioned config for active/inactive/archive thresholds."""
+
+    id: str = Field(default_factory=_new_id)
+    project_id: str
+    version: int = 1
+    profile: dict[str, Any] = Field(default_factory=dict)
+    is_active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemIndexDiff(BaseModel):
+    """Record of a single index_update run's diff output (new/reactivated/deactivated/etc.)."""
+
+    id: str = Field(default_factory=_new_id)
+    scan_run_id: str | None = None
+    project_id: str | None = None
+    diff_type: str = "incremental"  # 'initial' | 'incremental'
+    new_count: int = 0
+    reactivated_count: int = 0
+    deactivated_count: int = 0
+    stale_count: int = 0
+    archived_count: int = 0
+    details_json: dict[str, Any] = Field(default_factory=dict)
+    markdown_summary: str = ""
+    alerted: bool = False
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+
+
+class EcosystemStatusChange(BaseModel):
+    """Tracks individual repo status transitions (active → inactive, etc.)."""
+
+    id: str = Field(default_factory=_new_id)
+    repo_id: str
+    project_id: str | None = None
+    from_status: str | None = None
+    to_status: str
+    scan_run_id: str | None = None
+    reason: str = ""
+    triggered_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
 # ============================================================

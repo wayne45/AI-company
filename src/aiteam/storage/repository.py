@@ -20,13 +20,17 @@ from aiteam.storage.models import (
     AgentModel,
     ChannelMessageModel,
     CrossMessageModel,
+    EcosystemDataSourceModel,
     EcosystemDeepReviewModel,
+    EcosystemIndexDiffModel,
     EcosystemProjectSettingsModel,
     EcosystemRelationModel,
     EcosystemRepoProfileModel,
     EcosystemRepoStatusSnapshotModel,
     EcosystemRepoTagModel,
+    EcosystemScanProfileModel,
     EcosystemScanRunModel,
+    EcosystemStatusChangeModel,
     EcosystemTagModel,
     EventModel,
     LeaderBriefingModel,
@@ -49,8 +53,11 @@ from aiteam.types import (
     ChannelMessage,
     CrossMessage,
     CrossMessageType,
+    DataSource,
+    DataSourceKind,
     EcosystemDeepReview,
     EcosystemDeepReviewStatus,
+    EcosystemIndexDiff,
     EcosystemProjectSettings,
     EcosystemRelation,
     EcosystemRepoProfile,
@@ -58,6 +65,7 @@ from aiteam.types import (
     EcosystemRepoTag,
     EcosystemScanRun,
     EcosystemStageStatus,
+    EcosystemStatusChange,
     EcosystemTag,
     Event,
     EventType,
@@ -73,6 +81,7 @@ from aiteam.types import (
     PipelineState,
     Project,
     Report,
+    ScanProfile,
     ScheduledTask,
     StageTransition,
     Task,
@@ -2416,6 +2425,258 @@ class StorageRepository:
             return [r.to_pydantic() for r in rows]
 
     # ================================================================
+    # Ecosystem worker pool claim helpers (v1.5.3)
+    # ================================================================
+
+    async def claim_next_shallow_repo(
+        self,
+        worker_id: str,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview | None:
+        """原子认领下一个待浅扫仓（stage_status='queued'，claimed_by IS NULL）。
+
+        使用两步原子协议：
+        1. UPDATE ... WHERE stage_status='queued' AND claimed_by IS NULL LIMIT 1 SET claimed_by=worker_id
+        2. 用 rowcount 判断是否成功（rowcount > 0 = 认领成功），再 SELECT 取回完整行。
+
+        SQLite 序列化写入保证两步操作间不会有其他 writer 插入，rowcount 是
+        "我是否真正更新了行"的唯一真相源，避免 SKIP LOCKED（SQLite 不支持）。
+
+        Args:
+            worker_id: 认领方的唯一标识字符串。
+            project_id: 显式作用域；空时回退到 _project_scope。
+
+        Returns:
+            认领到的深扫报告（已写入 claimed_by/claimed_at），无可用行时返回 None。
+        """
+        from sqlalchemy import text
+
+        effective_pid = self._effective_project_id(project_id)
+        now = datetime.now(tz=timezone.utc)
+        now_str = now.isoformat()
+
+        async with get_session(self._db_url) as session:
+            # Retry loop: handle the case where another worker claims the same candidate
+            # between our SELECT (read) and UPDATE (write). SQLite serializes writes so
+            # rowcount=0 means we lost the race; we then find the next unclaimed row.
+            already_tried: set[str] = set()
+            while True:
+                # Step 1: find the next unclaimed candidate (skip already-tried ids)
+                candidate_stmt = (
+                    select(EcosystemDeepReviewModel.id)
+                    .where(EcosystemDeepReviewModel.stage_status == "queued")
+                    .where(EcosystemDeepReviewModel.claimed_by.is_(None))
+                    .order_by(EcosystemDeepReviewModel.created_at.asc())
+                    .limit(1)
+                )
+                if effective_pid is not None:
+                    candidate_stmt = candidate_stmt.where(
+                        EcosystemDeepReviewModel.project_id == effective_pid
+                    )
+                # Expire session cache so we see committed changes from other workers
+                await session.execute(text("SELECT 1"))
+                candidate_result = await session.execute(candidate_stmt)
+                candidate_id = candidate_result.scalar_one_or_none()
+                if candidate_id is None:
+                    return None
+                if candidate_id in already_tried:
+                    return None  # Row exists but was just claimed by someone else
+                already_tried.add(candidate_id)
+
+                # Step 2: atomic UPDATE — wins only if claimed_by is still NULL
+                update_result = await session.execute(
+                    text(
+                        "UPDATE ecosystem_deep_reviews "
+                        "SET claimed_by = :worker_id, claimed_at = :now "
+                        "WHERE id = :row_id AND claimed_by IS NULL"
+                    ),
+                    {"worker_id": worker_id, "now": now_str, "row_id": candidate_id},
+                )
+                if update_result.rowcount > 0:
+                    break  # We won the race — fetch and return
+
+            # Step 3: fetch the updated row to return full Pydantic model
+            await session.execute(text("SELECT 1"))  # flush read cache
+            fetch_result = await session.execute(
+                select(EcosystemDeepReviewModel).where(
+                    EcosystemDeepReviewModel.id == candidate_id
+                )
+            )
+            row = fetch_result.scalar_one_or_none()
+            if row is None:
+                return None
+            await session.refresh(row)
+            return row.to_pydantic()
+
+    async def claim_next_review_repo(
+        self,
+        worker_id: str,
+        project_id: str | None = None,
+        min_stars: int = 0,
+    ) -> tuple[EcosystemDeepReview, EcosystemRepoProfile] | None:
+        """原子认领下一个待质量审查行（stage_status='shallow_done'，quality_score IS NULL，claimed_by IS NULL）。
+
+        同时返回关联的 EcosystemRepoProfile（含 shallow_summary 供审查者评估）。
+
+        Args:
+            worker_id: 认领方的唯一标识字符串。
+            project_id: 显式作用域；空时回退到 _project_scope。
+            min_stars: 最小星数过滤，0 表示不过滤。
+
+        Returns:
+            (deep_review, repo_profile) 元组；无可用行时返回 None。
+        """
+        from sqlalchemy import text as sa_text
+
+        effective_pid = self._effective_project_id(project_id)
+        now = datetime.now(tz=timezone.utc)
+        now_str = now.isoformat()
+
+        async with get_session(self._db_url) as session:
+            # Step 1: find candidate with JOIN on profile stars filter
+            candidate_stmt = (
+                select(EcosystemDeepReviewModel.id, EcosystemDeepReviewModel.repo_id)
+                .join(
+                    EcosystemRepoProfileModel,
+                    EcosystemDeepReviewModel.repo_id == EcosystemRepoProfileModel.id,
+                )
+                .where(EcosystemDeepReviewModel.stage_status == "shallow_done")
+                .where(EcosystemDeepReviewModel.quality_score.is_(None))
+                .where(EcosystemDeepReviewModel.claimed_by.is_(None))
+                .order_by(EcosystemDeepReviewModel.created_at.asc())
+                .limit(1)
+            )
+            if effective_pid is not None:
+                candidate_stmt = candidate_stmt.where(
+                    EcosystemDeepReviewModel.project_id == effective_pid
+                )
+            if min_stars > 0:
+                candidate_stmt = candidate_stmt.where(
+                    EcosystemRepoProfileModel.stars >= min_stars
+                )
+            candidate_result = await session.execute(candidate_stmt)
+            candidate_row = candidate_result.first()
+            if candidate_row is None:
+                return None
+            candidate_id, repo_id = candidate_row
+
+            # Step 2: atomic UPDATE — wins only if claimed_by is still NULL
+            update_result = await session.execute(
+                sa_text(
+                    "UPDATE ecosystem_deep_reviews "
+                    "SET claimed_by = :worker_id, claimed_at = :now "
+                    "WHERE id = :row_id AND claimed_by IS NULL"
+                ),
+                {"worker_id": worker_id, "now": now_str, "row_id": candidate_id},
+            )
+            if update_result.rowcount == 0:
+                return None
+
+            # Step 3: fetch updated review + profile
+            dr_result = await session.execute(
+                select(EcosystemDeepReviewModel).where(
+                    EcosystemDeepReviewModel.id == candidate_id
+                )
+            )
+            dr_row = dr_result.scalar_one_or_none()
+            if dr_row is None:
+                return None
+            await session.refresh(dr_row)
+
+            profile_result = await session.execute(
+                select(EcosystemRepoProfileModel).where(
+                    EcosystemRepoProfileModel.id == repo_id
+                )
+            )
+            profile_row = profile_result.scalar_one_or_none()
+            if profile_row is None:
+                return None
+            return dr_row.to_pydantic(), profile_row.to_pydantic()
+
+    async def apply_quality_review(
+        self,
+        dr_id: str,
+        quality_score: int,
+        quality_notes: str,
+        recommendation: str,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview | None:
+        """写入质量审查结果并释放认领锁。
+
+        写入 quality_score / quality_notes / reviewed_by / reviewed_at，
+        清空 claimed_by 释放认领锁，并更新 integration_recommendation。
+
+        Args:
+            dr_id: 目标 EcosystemDeepReview.id。
+            quality_score: 0-100 质量分。
+            quality_notes: 审查理由文本。
+            recommendation: integrate / reference / learn / skip。
+            project_id: 显式作用域；空时回退到 _project_scope。
+
+        Returns:
+            更新后的深扫报告；行不存在时返回 None。
+        """
+        effective_pid = self._effective_project_id(project_id)
+        now = datetime.now(tz=timezone.utc)
+
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel).where(
+                EcosystemDeepReviewModel.id == dr_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemDeepReviewModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            row.quality_score = quality_score
+            row.quality_notes = quality_notes
+            row.reviewed_by = row.claimed_by  # reviewer = who claimed it
+            row.reviewed_at = now
+            row.claimed_by = None  # release claim lock
+            row.claimed_at = None
+            if recommendation:
+                row.integration_recommendation = recommendation
+            await session.flush()
+            return row.to_pydantic()
+
+    async def release_claim(
+        self,
+        dr_id: str,
+        reason: str,
+        project_id: str | None = None,
+    ) -> EcosystemDeepReview | None:
+        """释放认领锁（不写质量分），将 reason 记录到 quality_notes。
+
+        用于 worker 放弃认领（超时、错误）场景，清空 claimed_by 让其他 worker 可重新认领。
+
+        Args:
+            dr_id: 目标 EcosystemDeepReview.id。
+            reason: 释放原因，记录到 quality_notes。
+            project_id: 显式作用域；空时回退到 _project_scope。
+
+        Returns:
+            更新后的深扫报告；行不存在时返回 None。
+        """
+        effective_pid = self._effective_project_id(project_id)
+
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel).where(
+                EcosystemDeepReviewModel.id == dr_id
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemDeepReviewModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            row.claimed_by = None
+            row.claimed_at = None
+            row.quality_notes = reason
+            await session.flush()
+            return row.to_pydantic()
+
+    # ================================================================
     # Ecosystem tags
     # ================================================================
 
@@ -3614,3 +3875,217 @@ class StorageRepository:
                 top_n=100,
             )
         return await self.upsert_ecosystem_project_settings(payload)
+
+    # ================================================================
+    # v1.6.0 P0: DataSource CRUD
+    # ================================================================
+
+    async def create_data_source(
+        self,
+        project_id: str,
+        kind: DataSourceKind,
+        name: str,
+        config: dict | None = None,
+    ) -> DataSource:
+        """Create a new data source configuration for a project."""
+        ds = DataSource(
+            project_id=project_id,
+            kind=kind,
+            name=name,
+            config=config or {},
+        )
+        orm = EcosystemDataSourceModel.from_pydantic(ds)
+        async with get_session(self._db_url) as session:
+            session.add(orm)
+        return ds
+
+    async def list_data_sources(self, project_id: str) -> list[DataSource]:
+        """List all data sources for a project."""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemDataSourceModel).where(
+                    EcosystemDataSourceModel.project_id == project_id
+                )
+            )
+            rows = result.scalars().all()
+        return [r.to_pydantic() for r in rows]
+
+    async def update_data_source(
+        self,
+        ds_id: str,
+        *,
+        name: str | None = None,
+        config: dict | None = None,
+        enabled: bool | None = None,
+    ) -> DataSource:
+        """Update a data source and increment its version."""
+        from datetime import datetime, timezone
+
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemDataSourceModel).where(
+                    EcosystemDataSourceModel.id == ds_id
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise NotFoundError(f"DataSource {ds_id} not found")
+            if name is not None:
+                row.name = name
+            if config is not None:
+                row.config_json = config
+            if enabled is not None:
+                row.enabled = enabled
+            row.version = (row.version or 1) + 1
+            row.updated_at = datetime.now(tz=timezone.utc)
+            return row.to_pydantic()
+
+    async def disable_data_source(self, ds_id: str) -> None:
+        """Disable a data source (soft delete via enabled=False)."""
+        await self.update_data_source(ds_id, enabled=False)
+
+    # ================================================================
+    # v1.6.0 P0: ScanProfile versioned CRUD
+    # ================================================================
+
+    async def get_active_scan_profile(self, project_id: str) -> ScanProfile | None:
+        """Return the active scan profile for a project, or None if none exists."""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemScanProfileModel)
+                .where(
+                    EcosystemScanProfileModel.project_id == project_id,
+                    EcosystemScanProfileModel.is_active == True,  # noqa: E712
+                )
+                .order_by(EcosystemScanProfileModel.version.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+        return row.to_pydantic() if row else None
+
+    async def create_or_update_scan_profile(
+        self,
+        project_id: str,
+        profile_dict: dict,
+    ) -> ScanProfile:
+        """Create a new scan profile version; deactivate the previous active version.
+
+        Each call creates a new row (version increments). Old is_active rows
+        for this project are set to False atomically.
+        """
+        async with get_session(self._db_url) as session:
+            # Deactivate all current active profiles for this project
+            result = await session.execute(
+                select(EcosystemScanProfileModel).where(
+                    EcosystemScanProfileModel.project_id == project_id,
+                    EcosystemScanProfileModel.is_active == True,  # noqa: E712
+                )
+            )
+            old_rows = result.scalars().all()
+            max_version = 0
+            for old in old_rows:
+                old.is_active = False
+                if (old.version or 0) > max_version:
+                    max_version = old.version or 0
+
+            new_profile = ScanProfile(
+                project_id=project_id,
+                version=max_version + 1,
+                profile=profile_dict,
+                is_active=True,
+            )
+            orm = EcosystemScanProfileModel.from_pydantic(new_profile)
+            session.add(orm)
+        return new_profile
+
+    # ================================================================
+    # v1.6.0 P0.4: EcosystemIndexDiff CRUD
+    # ================================================================
+
+    async def create_index_diff(self, diff: EcosystemIndexDiff) -> EcosystemIndexDiff:
+        """Persist an index diff record."""
+        async with get_session(self._db_url) as session:
+            orm = EcosystemIndexDiffModel.from_pydantic(diff)
+            session.add(orm)
+        return diff
+
+    async def get_latest_index_diff(self, project_id: str) -> EcosystemIndexDiff | None:
+        """Return the most recent index diff for a project."""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemIndexDiffModel)
+                .where(EcosystemIndexDiffModel.project_id == project_id)
+                .order_by(EcosystemIndexDiffModel.generated_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+            return row.to_pydantic() if row else None
+
+    async def list_index_diffs(
+        self,
+        project_id: str,
+        limit: int = 10,
+    ) -> list[EcosystemIndexDiff]:
+        """Return recent index diffs for a project, newest first."""
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemIndexDiffModel)
+                .where(EcosystemIndexDiffModel.project_id == project_id)
+                .order_by(EcosystemIndexDiffModel.generated_at.desc())
+                .limit(limit)
+            )
+            rows = result.scalars().all()
+            return [r.to_pydantic() for r in rows]
+
+    # ================================================================
+    # v1.6.0 P0.4: EcosystemStatusChange CRUD
+    # ================================================================
+
+    async def create_status_change(self, sc: EcosystemStatusChange) -> EcosystemStatusChange:
+        """Persist a single repo status change record."""
+        async with get_session(self._db_url) as session:
+            orm = EcosystemStatusChangeModel.from_pydantic(sc)
+            session.add(orm)
+        return sc
+
+    async def bulk_create_status_changes(
+        self,
+        changes: list[EcosystemStatusChange],
+    ) -> int:
+        """Bulk insert status change records; returns count inserted."""
+        if not changes:
+            return 0
+        async with get_session(self._db_url) as session:
+            for sc in changes:
+                session.add(EcosystemStatusChangeModel.from_pydantic(sc))
+        return len(changes)
+
+    async def update_repo_active_status(
+        self,
+        repo_id: str,
+        new_status: str,
+        popularity_percentile: float | None = None,
+        activity_score: float | None = None,
+        active_rank: int | None = None,
+    ) -> None:
+        """Update last_active_status and optional NormalizedSignal fields on a repo profile."""
+        from sqlalchemy import update as sa_update
+
+        now = datetime.now(tz=timezone.utc)
+        values: dict = {
+            "last_active_status": new_status,
+            "last_status_change_at": now,
+        }
+        if popularity_percentile is not None:
+            values["popularity_percentile"] = popularity_percentile
+        if activity_score is not None:
+            values["activity_score"] = activity_score
+        if active_rank is not None:
+            values["active_rank"] = active_rank
+
+        async with get_session(self._db_url) as session:
+            await session.execute(
+                sa_update(EcosystemRepoProfileModel)
+                .where(EcosystemRepoProfileModel.id == repo_id)
+                .values(**values)
+            )

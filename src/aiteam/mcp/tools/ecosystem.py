@@ -1549,3 +1549,357 @@ def register(mcp: Any) -> None:
         if not result:
             return {"success": False, "error": "lifecycle api unavailable"}
         return result
+
+    # ============================================================
+    # Worker pool claim tools (v1.5.3)
+    # ============================================================
+
+    @mcp.tool()
+    def ecosystem_claim_shallow(worker_id: str) -> dict[str, Any]:
+        """Claim the next queued repo for shallow scanning (stage_status='queued').
+
+        Atomic: only one worker gets each row; others get {"claimed": false}.
+
+        Args:
+            worker_id: Unique worker identifier string.
+
+        Returns:
+            {"claimed": true, "dr_id": ..., "repo_id": ..., "claimed_by": ..., "claimed_at": ...}
+            or {"claimed": false} when queue is empty.
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/shallow_queue/claim",
+            {"worker_id": worker_id},
+            extra_headers=_project_headers(),
+        )
+        if result is None:
+            return {"claimed": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_claim_review(worker_id: str, min_stars: int = 0) -> dict[str, Any]:
+        """Claim the next shallow_done repo for quality review.
+
+        Finds stage_status='shallow_done' rows with no quality_score and no active claim.
+        Returns the repo's shallow_summary so the reviewer can evaluate quality.
+
+        Args:
+            worker_id: Unique worker identifier string.
+            min_stars: Minimum star count filter (0 = no filter).
+
+        Returns:
+            {"claimed": true, "dr_id": ..., "repo_id": ..., "shallow_summary": ..., ...}
+            or {"claimed": false} when queue is empty.
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/review_queue/claim",
+            {"worker_id": worker_id, "min_stars": min_stars},
+            extra_headers=_project_headers(),
+        )
+        if result is None:
+            return {"claimed": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_apply_quality_review(
+        dr_id: str,
+        quality_score: int,
+        quality_notes: str = "",
+        recommendation: str = "",
+    ) -> dict[str, Any]:
+        """Submit quality review result and release the claim lock.
+
+        Writes quality_score / quality_notes / reviewed_by / reviewed_at,
+        clears claimed_by so other workers can pick up the next row.
+
+        Args:
+            dr_id: EcosystemDeepReview.id to update.
+            quality_score: 0-100 quality score.
+            quality_notes: Reviewer notes / rationale.
+            recommendation: integrate / reference / learn / skip.
+
+        Returns:
+            {"success": true, "dr_id": ..., "quality_score": ..., "reviewed_by": ...}
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/review_queue/apply",
+            {
+                "dr_id": dr_id,
+                "quality_score": quality_score,
+                "quality_notes": quality_notes,
+                "recommendation": recommendation,
+            },
+            extra_headers=_project_headers(),
+        )
+        if result is None:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_release_claim(dr_id: str, reason: str = "") -> dict[str, Any]:
+        """Release a worker claim without submitting a quality review.
+
+        Use when a worker abandons a task (timeout, error). Clears claimed_by
+        so another worker can pick up the row. Records reason in quality_notes.
+
+        Args:
+            dr_id: EcosystemDeepReview.id to release.
+            reason: Short description of why the claim is being released.
+
+        Returns:
+            {"success": true, "dr_id": ..., "claimed_by": null, "quality_notes": ...}
+        """
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/claims/release",
+            {"dr_id": dr_id, "reason": reason},
+            extra_headers=_project_headers(),
+        )
+        if result is None:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    # ============================================================
+    # v1.6.0 P0.3 — DataSource / ScanProfile / IndexUpdate MCP tools
+    # ============================================================
+
+    @mcp.tool()
+    def ecosystem_quick_setup(
+        sources: list[str] | None = None,
+        queries: list[str] | None = None,
+        use_defaults: bool = True,
+        custom_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One-shot ecosystem setup wizard — create data sources + scan profile in one call.
+
+        Use this when bootstrapping a fresh project to ecosystem indexing. Maps to
+        ``POST /api/ecosystem/quick_setup`` which creates one DataSource per entry
+        in ``sources`` (each enabled by default) and persists either the default
+        ScanProfile or the merged ``custom_profile`` override.
+
+        Args:
+            sources: Data source kinds to enable, e.g. ``['github', 'huggingface']``.
+                Must each be a valid ``DataSourceKind`` value (github / huggingface /
+                npm / pypi / hackernews / producthunt / arxiv / custom). Defaults to
+                ``['github']`` when empty.
+            queries: Keyword / topic list applied to every created data source's
+                ``config.queries`` field. Optional.
+            use_defaults: When True (default), persist the built-in default
+                ScanProfile. When False, the API merges ``custom_profile`` over
+                the defaults.
+            custom_profile: Advanced override dict; ignored when
+                ``use_defaults=True``.
+
+        Returns:
+            ``{success: True, data_sources_created: N, data_source_ids: [...],
+              scan_profile_id, scan_profile_version, profile_created: bool,
+              next_action: 'call ecosystem_index_update(dry_run=True)',
+              raw: <API response>}``.
+            ``success`` semantics: True means the call completed; ``raw`` echoes
+            the underlying ``POST /api/ecosystem/quick_setup`` payload which
+            uses ``next_step`` (not ``next_action``) — the wrapper renames it
+            here for consistency with other ecosystem tools.
+            On failure: ``{success: False, error}``.
+        """
+        payload: dict[str, Any] = {
+            "sources": sources or ["github"],
+            "queries": queries or [],
+            "use_defaults": use_defaults,
+        }
+        if custom_profile is not None:
+            payload["custom_profile"] = custom_profile
+
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/quick_setup",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        if isinstance(result, dict) and result.get("success") is False:
+            return result
+
+        ds_ids = result.get("data_source_ids", []) if isinstance(result, dict) else []
+        return {
+            "success": True,
+            "data_sources_created": len(ds_ids),
+            "data_source_ids": ds_ids,
+            "scan_profile_id": result.get("scan_profile_id"),
+            "scan_profile_version": result.get("scan_profile_version"),
+            "profile_created": result.get("scan_profile_id") is not None,
+            "next_action": "call ecosystem_index_update(dry_run=True)",
+            "raw": result,
+        }
+
+    @mcp.tool()
+    def ecosystem_data_source_create(
+        kind: str,
+        name: str,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a single DataSource configuration for the current project.
+
+        Maps to ``POST /api/ecosystem/data_sources``. Use this when you need
+        fine-grained control over a specific source (e.g. a curated query list
+        or rate-limit override) instead of the bulk ``ecosystem_quick_setup``.
+
+        Args:
+            kind: DataSourceKind enum value — one of github / huggingface /
+                npm / pypi / hackernews / producthunt / arxiv / custom.
+                Backend returns 422 on unknown kinds with the valid list.
+            name: Friendly display name shown in the dashboard.
+            config: Source-specific config dict, e.g.
+                ``{'queries': ['mcp-server'], 'filters': {...},
+                'rate_limit': {...}}``. Empty dict allowed.
+
+        Returns:
+            ``{success: True, data_source: {id, project_id, kind, name, config,
+              enabled, version, created_at}}``. ``success`` semantics: True =
+            row was created; False = API rejected the call.
+            On failure: ``{success: False, error, detail}``.
+        """
+        payload: dict[str, Any] = {
+            "kind": kind,
+            "name": name,
+            "config": config or {},
+        }
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/data_sources",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_scan_profile_update(
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a new ScanProfile version (previous version is deactivated).
+
+        Maps to ``PUT /api/ecosystem/scan_profile``. The full profile dict is
+        persisted as a new version; the previous active row's ``is_active`` is
+        flipped to False (rollback is possible via history). Pass the complete
+        profile, not a partial patch.
+
+        Args:
+            profile: Complete ScanProfile JSON. Typical keys include
+                ``min_popularity_floor`` (per-source thresholds), language
+                allow/deny lists, archive cutoffs, and per-source query
+                overrides. Refer to the default profile shape returned by
+                ``GET /api/ecosystem/scan_profile``.
+
+        Returns:
+            ``{success: True, scan_profile: {id, project_id, version, profile,
+              is_active, created_at}}``. ``success`` semantics: True = new
+            version persisted (previous version's ``is_active`` flipped to
+            False).
+            On failure: ``{success: False, error, detail}``.
+        """
+        payload = {"profile": profile}
+        result = _api_call(
+            "PUT",
+            "/api/ecosystem/scan_profile",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_index_update(dry_run: bool = True) -> dict[str, Any]:
+        """Trigger ecosystem index update — runs scanner + computes diff.
+
+        Maps to ``POST /api/ecosystem/index_update``. Verifies that at least
+        one enabled DataSource and an active ScanProfile exist, then runs the
+        full pipeline: gh search → NormalizedSignal → classify active status
+        → diff against DB → alert threshold check → (if dry_run=False) persist
+        index_diff + status_changes. When ``dry_run=True``, no writes touch
+        ``ecosystem_repo_profiles`` / ``ecosystem_index_diffs`` /
+        ``ecosystem_status_changes`` (BUG #6/#8 fix verified in
+        ``test_dry_run_does_not_write_profile_table``).
+
+        Args:
+            dry_run: When True (default), simulate the scan and return diff
+                preview only. When False, persist profile upserts + index_diff
+                + status_changes.
+
+        Returns:
+            Normal completion (setup OK, no alert): ``{success: True, dry_run,
+              alerted: False, scan_profile_version, total_scanned,
+              diff: {id, new_count, reactivated_count, deactivated_count,
+                stale_count, archived_count, markdown_summary},
+              message}``.
+            Threshold breach (BUG #5 fix): ``{success: True, dry_run,
+              alerted: True, message, diff: {new_count, reactivated_count,
+              deactivated_count, stale_count, archived_count}}``.
+            Missing setup: ``{success: False, dry_run, missing_setup:
+              [<'data_source'|'scan_profile'>...], message}``.
+            gh CLI auth missing: ``{success: False, dry_run,
+              missing_setup: ['gh_auth' | 'gh_cli'], message}``.
+            ``success`` semantics: True = call completed cleanly (including
+            dry_run previews and alerted=True threshold breaches);
+            False = configuration is incomplete and the scan did not run.
+            Check ``alerted`` and ``missing_setup`` for special states even
+            when ``success`` is True/False.
+        """
+        payload = {"dry_run": dry_run}
+        result = _api_call(
+            "POST",
+            "/api/ecosystem/index_update",
+            payload,
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_index_diff_latest() -> dict[str, Any]:
+        """Fetch the latest IndexDiff snapshot for the current project.
+
+        Maps to ``GET /api/ecosystem/index_diffs/latest``. Returns the most
+        recent diff row produced by a real ``ecosystem_index_update``
+        (dry_run=False) run. Dry-run previews are not persisted and therefore
+        never appear here.
+
+        Returns:
+            Diff available: ``{success: True, diff: {id, diff_type,
+              new_count, reactivated_count, deactivated_count, stale_count,
+              archived_count, markdown_summary, alerted, generated_at}}``.
+            No diffs yet (fresh project): ``{success: True, diff: None,
+              message: 'No index diffs found yet.'}``.
+            Legacy/unbuilt API: ``{success: False, error:
+              'P0.4 will implement', detail}`` (returned when the endpoint
+              answers 404).
+            Other failure: ``{success: False, error, detail}``.
+            ``success`` semantics: True = call completed (``diff`` may be None
+            when the project has never run a non-dry index_update);
+            False = API/endpoint error. The API field is ``diff`` — older
+            internal references to ``index_diff`` are obsolete.
+        """
+        result = _api_call(
+            "GET",
+            "/api/ecosystem/index_diffs/latest",
+            extra_headers=_project_headers(),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        # Map 404 / not-found-style responses to a stable stub signal so callers
+        # can distinguish "P0.4 not shipped yet" from other API failures.
+        if isinstance(result, dict) and result.get("success") is False:
+            detail = (result.get("error") or "") + " " + (result.get("detail") or "")
+            if "404" in detail or "Not Found" in detail or "not_found" in detail:
+                return {
+                    "success": False,
+                    "error": "P0.4 will implement",
+                    "detail": result.get("detail", ""),
+                }
+        return result

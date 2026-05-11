@@ -134,6 +134,21 @@ COLUMNS_TO_ENSURE: list[tuple[str, str, str]] = [
     ("ecosystem_repo_profiles", "fetch_failure_count", "INTEGER DEFAULT 0"),
     ("ecosystem_repo_profiles", "is_active", "BOOLEAN DEFAULT 1"),
     ("ecosystem_repo_profiles", "active_rank", "INTEGER"),
+    # v1.5.3: worker pool claim 字段
+    ("ecosystem_deep_reviews", "claimed_by", "TEXT"),
+    ("ecosystem_deep_reviews", "claimed_at", "DATETIME"),
+    ("ecosystem_deep_reviews", "quality_score", "INTEGER"),
+    ("ecosystem_deep_reviews", "quality_notes", "TEXT"),
+    ("ecosystem_deep_reviews", "reviewed_by", "TEXT"),
+    ("ecosystem_deep_reviews", "reviewed_at", "DATETIME"),
+    # v1.6.0-P0: multi-source fields on ecosystem_repo_profiles
+    ("ecosystem_repo_profiles", "canonical_id", "VARCHAR(200)"),
+    ("ecosystem_repo_profiles", "source_kind", "VARCHAR(20) DEFAULT 'github'"),
+    ("ecosystem_repo_profiles", "last_active_status", "VARCHAR(20)"),
+    ("ecosystem_repo_profiles", "last_status_change_at", "DATETIME"),
+    # v1.6.0-P0.4: NormalizedSignal fields on ecosystem_repo_profiles
+    ("ecosystem_repo_profiles", "popularity_percentile", "FLOAT"),
+    ("ecosystem_repo_profiles", "activity_score", "FLOAT"),
 ]
 
 
@@ -248,6 +263,10 @@ def _sqlite_migrate(db_path: str) -> None:
         if _table_exists(con, "ecosystem_repo_profiles"):
             _ensure_ecosystem_profile_project_unique(con)
             _ensure_ecosystem_perf_indexes(con)
+
+        # v1.6.0-P0: backfill canonical_id + source_kind for existing github repos
+        if _table_exists(con, "ecosystem_repo_profiles"):
+            _backfill_v160_repo_profile_fields(con)
     finally:
         con.close()
 
@@ -273,6 +292,41 @@ def _ensure_ecosystem_perf_indexes(con: object) -> None:
             # e.g. column missing in legacy schema — skip silently
             continue
     con.commit()
+
+
+def _backfill_v160_repo_profile_fields(con: object) -> None:
+    """v1.6.0-P0: backfill canonical_id and source_kind for existing github repos.
+
+    Idempotent: only updates rows where canonical_id IS NULL.
+    Maps is_active to last_active_status (True->'active', False->'inactive').
+    """
+    import sqlite3
+
+    if not isinstance(con, sqlite3.Connection):
+        return  # pragma: no cover
+
+    try:
+        # backfill canonical_id = 'github/' + repo_full_name where NULL
+        con.execute(
+            "UPDATE ecosystem_repo_profiles "
+            "SET canonical_id = 'github/' || repo_full_name "
+            "WHERE canonical_id IS NULL AND repo_full_name IS NOT NULL"
+        )
+        # backfill source_kind = 'github' where NULL or empty
+        con.execute(
+            "UPDATE ecosystem_repo_profiles "
+            "SET source_kind = 'github' "
+            "WHERE source_kind IS NULL OR source_kind = ''"
+        )
+        # backfill last_active_status from is_active where NULL
+        con.execute(
+            "UPDATE ecosystem_repo_profiles "
+            "SET last_active_status = CASE WHEN is_active = 1 THEN 'active' ELSE 'inactive' END "
+            "WHERE last_active_status IS NULL"
+        )
+        con.commit()
+    except sqlite3.OperationalError:
+        pass  # columns may not exist yet in empty DB — create_all handles that
 
 
 def _ensure_ecosystem_profile_project_unique(con: object) -> None:

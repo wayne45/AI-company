@@ -22,13 +22,45 @@ from aiteam.services.ecosystem_summarizer import (
 from aiteam.services.ecosystem_tagger import EcosystemTagger
 from aiteam.storage.repository import StorageRepository
 from aiteam.types import (
+    DataSourceKind,
     EcosystemDeepReview,
+    EcosystemIndexDiff,
     EcosystemRepoProfile,
     EcosystemScanRun,
     EcosystemScanStrategy,
+    EcosystemStatusChange,
     EcosystemTag,
     EcosystemTagCategory,
 )
+
+# Default ScanProfile template — used when no profile has been configured
+_DEFAULT_SCAN_PROFILE: dict = {
+    "active_definition": {
+        "primary_metric_kind": "popularity_rank",
+        "active_top_n_per_source": 200,
+        "min_popularity_floor": {
+            "github": 1000,
+            "huggingface": 500,
+            "npm": 1000,
+            "pypi": 1000,
+            "hackernews": 100,
+            "producthunt": 50,
+            "arxiv": 10,
+        },
+    },
+    "inactive_signals": {
+        "no_activity_days": 180,
+        "rank_drop_to_below": 500,
+    },
+    "archive_signals": {
+        "no_activity_days": 730,
+        "source_archived": True,
+    },
+    "alert_thresholds": {
+        "max_new_per_scan": 50,
+        "max_archived_per_scan": 30,
+    },
+}
 
 router = APIRouter(prefix="/api/ecosystem", tags=["ecosystem"])
 
@@ -1563,6 +1595,134 @@ async def lifecycle_trigger_debate(
     }
 
 
+# ============================================================
+# Worker pool claim endpoints (v1.5.3)
+# ============================================================
+
+
+class ShallowQueueClaimBody(BaseModel):
+    worker_id: str
+
+
+class ReviewQueueClaimBody(BaseModel):
+    worker_id: str
+    min_stars: int = 0
+
+
+class ApplyQualityReviewBody(BaseModel):
+    dr_id: str
+    quality_score: int = Field(..., ge=0, le=100)
+    quality_notes: str = ""
+    recommendation: str = ""
+
+
+class ReleaseClaimBody(BaseModel):
+    dr_id: str
+    reason: str = ""
+
+
+@router.post("/shallow_queue/claim")
+async def shallow_queue_claim(
+    body: ShallowQueueClaimBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """认领下一个待浅扫仓（stage_status='queued'，claimed_by IS NULL）。
+
+    原子操作：SELECT + UPDATE WHERE claimed_by IS NULL，并发安全。
+    Returns claimed deep_review row or {"claimed": false} when queue is empty.
+    """
+    review = await repo.claim_next_shallow_repo(worker_id=body.worker_id)
+    if review is None:
+        return {"claimed": False}
+    return {
+        "claimed": True,
+        "dr_id": review.id,
+        "repo_id": review.repo_id,
+        "claimed_by": review.claimed_by,
+        "claimed_at": review.claimed_at.isoformat() if review.claimed_at else None,
+        "stage_status": review.stage_status.value if hasattr(review.stage_status, "value") else str(review.stage_status),
+    }
+
+
+@router.post("/review_queue/claim")
+async def review_queue_claim(
+    body: ReviewQueueClaimBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """认领下一个待质量审查行（stage_status='shallow_done'，quality_score IS NULL，claimed_by IS NULL）。
+
+    同时返回关联 repo profile 的 shallow_summary 供审查者评估。
+    Returns claimed review + profile or {"claimed": false} when queue is empty.
+    """
+    result = await repo.claim_next_review_repo(
+        worker_id=body.worker_id,
+        min_stars=body.min_stars,
+    )
+    if result is None:
+        return {"claimed": False}
+    review, profile = result
+    return {
+        "claimed": True,
+        "dr_id": review.id,
+        "repo_id": review.repo_id,
+        "claimed_by": review.claimed_by,
+        "claimed_at": review.claimed_at.isoformat() if review.claimed_at else None,
+        "stage_status": review.stage_status.value if hasattr(review.stage_status, "value") else str(review.stage_status),
+        "repo_full_name": profile.repo_full_name,
+        "stars": profile.stars,
+        "shallow_summary": profile.shallow_summary,
+    }
+
+
+@router.post("/review_queue/apply")
+async def review_queue_apply(
+    body: ApplyQualityReviewBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """写入质量审查结果并释放认领锁。
+
+    写入 quality_score / quality_notes / reviewed_by / reviewed_at，
+    清空 claimed_by 释放认领锁。
+    """
+    review = await repo.apply_quality_review(
+        dr_id=body.dr_id,
+        quality_score=body.quality_score,
+        quality_notes=body.quality_notes,
+        recommendation=body.recommendation,
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "dr_id": review.id,
+        "quality_score": review.quality_score,
+        "quality_notes": review.quality_notes,
+        "reviewed_by": review.reviewed_by,
+        "reviewed_at": review.reviewed_at.isoformat() if review.reviewed_at else None,
+        "claimed_by": review.claimed_by,
+    }
+
+
+@router.post("/claims/release")
+async def claims_release(
+    body: ReleaseClaimBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """释放认领锁（worker 放弃），清空 claimed_by 让其他 worker 可重新认领。
+
+    reason 记录到 quality_notes 便于追踪。
+    """
+    review = await repo.release_claim(dr_id=body.dr_id, reason=body.reason)
+    if review is None:
+        raise HTTPException(status_code=404, detail="deep_review not found")
+    return {
+        "success": True,
+        "dr_id": review.id,
+        "claimed_by": review.claimed_by,
+        "quality_notes": review.quality_notes,
+    }
+
+
 @router.post("/lifecycle/link_debate_meeting")
 async def lifecycle_link_debate_meeting(
     body: LinkDebateMeetingBody,
@@ -1798,4 +1958,771 @@ async def retry_failed_repo(
         "repo_full_name": profile.repo_full_name,
         "reason": body.reason,
         "next_action": "Stage 0 浅扫队列下次 tick 会重新派遣 agent",
+    }
+
+
+# ============================================================
+# v1.6.0 P0.2: DataSource + ScanProfile + QuickSetup endpoints
+# ============================================================
+
+
+def _get_project_id_from_repo(repo: StorageRepository, request: Any = None) -> str:
+    """Extract project_id from repository scope."""
+    return repo._project_scope or ""
+
+
+class DataSourceCreateBody(BaseModel):
+    kind: str
+    name: str
+    config: dict = Field(default_factory=dict)
+
+
+class DataSourceUpdateBody(BaseModel):
+    name: str | None = None
+    config: dict | None = None
+    enabled: bool | None = None
+
+
+class ScanProfileUpdateBody(BaseModel):
+    profile: dict
+
+
+class QuickSetupBody(BaseModel):
+    sources: list[str] = Field(default=["github"])
+    queries: list[str] = Field(default_factory=list)
+    use_defaults: bool = True
+    custom_profile: dict | None = None
+
+
+class IndexUpdateBody(BaseModel):
+    dry_run: bool = True
+
+
+@router.post("/data_sources")
+async def create_data_source(
+    body: DataSourceCreateBody,
+    request: Any = Depends(lambda: None),
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Create a new data source configuration for the current project."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    try:
+        kind = DataSourceKind(body.kind)
+    except ValueError:
+        valid = [k.value for k in DataSourceKind]
+        raise HTTPException(
+            status_code=422, detail=f"Invalid kind '{body.kind}'. Valid: {valid}"
+        )
+
+    ds = await repo.create_data_source(
+        project_id=project_id,
+        kind=kind,
+        name=body.name,
+        config=body.config,
+    )
+    return {
+        "success": True,
+        "data_source": {
+            "id": ds.id,
+            "project_id": ds.project_id,
+            "kind": ds.kind.value,
+            "name": ds.name,
+            "config": ds.config,
+            "enabled": ds.enabled,
+            "version": ds.version,
+            "created_at": ds.created_at.isoformat(),
+        },
+    }
+
+
+@router.get("/data_sources")
+async def list_data_sources(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """List all data sources for the current project."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    sources = await repo.list_data_sources(project_id)
+    return {
+        "success": True,
+        "data_sources": [
+            {
+                "id": ds.id,
+                "project_id": ds.project_id,
+                "kind": ds.kind.value,
+                "name": ds.name,
+                "config": ds.config,
+                "enabled": ds.enabled,
+                "version": ds.version,
+                "created_at": ds.created_at.isoformat(),
+            }
+            for ds in sources
+        ],
+        "total": len(sources),
+    }
+
+
+@router.put("/data_sources/{ds_id}")
+async def update_data_source(
+    ds_id: str,
+    body: DataSourceUpdateBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Update a data source configuration."""
+    from aiteam.api.exceptions import NotFoundError
+
+    try:
+        ds = await repo.update_data_source(
+            ds_id,
+            name=body.name,
+            config=body.config,
+            enabled=body.enabled,
+        )
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail=f"DataSource {ds_id} not found")
+
+    return {
+        "success": True,
+        "data_source": {
+            "id": ds.id,
+            "project_id": ds.project_id,
+            "kind": ds.kind.value,
+            "name": ds.name,
+            "config": ds.config,
+            "enabled": ds.enabled,
+            "version": ds.version,
+            "updated_at": ds.updated_at.isoformat(),
+        },
+    }
+
+
+@router.get("/scan_profile")
+async def get_scan_profile(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Get the active scan profile for the current project.
+
+    Returns the default profile with is_default=True when no profile is configured.
+    """
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    profile = await repo.get_active_scan_profile(project_id)
+    if profile is None:
+        return {
+            "success": True,
+            "is_default": True,
+            "scan_profile": {
+                "id": None,
+                "project_id": project_id,
+                "version": 0,
+                "profile": _DEFAULT_SCAN_PROFILE,
+                "is_active": True,
+                "created_at": None,
+            },
+        }
+
+    return {
+        "success": True,
+        "is_default": False,
+        "scan_profile": {
+            "id": profile.id,
+            "project_id": profile.project_id,
+            "version": profile.version,
+            "profile": profile.profile,
+            "is_active": profile.is_active,
+            "created_at": profile.created_at.isoformat(),
+        },
+    }
+
+
+@router.put("/scan_profile")
+async def update_scan_profile(
+    body: ScanProfileUpdateBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Create a new scan profile version (old version is deactivated)."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    profile = await repo.create_or_update_scan_profile(project_id, body.profile)
+    return {
+        "success": True,
+        "scan_profile": {
+            "id": profile.id,
+            "project_id": profile.project_id,
+            "version": profile.version,
+            "profile": profile.profile,
+            "is_active": profile.is_active,
+            "created_at": profile.created_at.isoformat(),
+        },
+    }
+
+
+@router.post("/quick_setup")
+async def quick_setup(
+    body: QuickSetupBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Minimal 3-question setup wizard — creates data sources + scan profile in one call."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    created_sources = []
+    for source_kind_str in body.sources:
+        try:
+            kind = DataSourceKind(source_kind_str)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown source kind: {source_kind_str}"
+            )
+        ds_config: dict = {}
+        if body.queries:
+            ds_config["queries"] = body.queries
+        ds = await repo.create_data_source(
+            project_id=project_id,
+            kind=kind,
+            name=f"{kind.value} default",
+            config=ds_config,
+        )
+        created_sources.append(ds.id)
+
+    # Build profile: use defaults or merge with custom overrides
+    profile_dict = dict(_DEFAULT_SCAN_PROFILE)
+    if not body.use_defaults and body.custom_profile:
+        profile_dict.update(body.custom_profile)
+
+    profile = await repo.create_or_update_scan_profile(project_id, profile_dict)
+
+    return {
+        "success": True,
+        "data_source_ids": created_sources,
+        "scan_profile_id": profile.id,
+        "scan_profile_version": profile.version,
+        "next_step": "Call POST /api/ecosystem/index_update?dry_run=true to preview changes",
+    }
+
+
+@router.post("/index_update")
+async def index_update(
+    body: IndexUpdateBody,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Trigger a real ecosystem index update scan with diff calculation.
+
+    Flow:
+      1. Verify scan_profile + data_sources are configured.
+      2. Check gh CLI auth status — return missing_setup when not logged in.
+      3. For each enabled github data_source, run EcosystemScanner with queries
+         from data_source.config['queries'].
+      4. Compute NormalizedSignal for each fresh repo (rank / percentile / activity_score).
+      5. Classify each repo against scan_profile.active_definition.
+      6. Diff against DB: new / reactivated / deactivated / stale / archived.
+      7. Check alert_thresholds — stop + return alert when exceeded.
+      8. dry_run=False: upsert profiles + write index_diffs + write status_changes.
+    """
+    import json
+    import subprocess
+    from datetime import timedelta
+
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    # ── Step 1: verify configuration ──────────────────────────────────────────
+    missing: list[str] = []
+    sources = await repo.list_data_sources(project_id)
+    active_sources = [s for s in sources if s.enabled]
+    if not active_sources:
+        missing.append("data_source")
+
+    profile = await repo.get_active_scan_profile(project_id)
+    if profile is None:
+        missing.append("scan_profile")
+
+    if missing:
+        return {
+            "success": False,
+            "dry_run": body.dry_run,
+            "missing_setup": missing,
+            "message": (
+                "Setup incomplete. Call POST /api/ecosystem/quick_setup first, "
+                "or configure data_sources and scan_profile individually."
+            ),
+        }
+
+    assert profile is not None  # narrowing for type checker
+
+    # ── Step 2: check gh CLI auth ─────────────────────────────────────────────
+    try:
+        auth_check = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if auth_check.returncode != 0:
+            return {
+                "success": False,
+                "dry_run": body.dry_run,
+                "missing_setup": ["gh_auth"],
+                "message": (
+                    "GitHub CLI is not authenticated. "
+                    "Run `gh auth login` then retry."
+                ),
+            }
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {
+            "success": False,
+            "dry_run": body.dry_run,
+            "missing_setup": ["gh_cli"],
+            "message": "GitHub CLI (gh) not found. Install from https://cli.github.com/ and run `gh auth login`.",
+        }
+
+    # ── Step 3a: capture pre-scan state for diff calculation ──────────────────
+    # Must be done BEFORE scanner upserts new repos, so we can identify truly new ones.
+    pre_scan_profiles, _ = await repo.search_ecosystem_profiles_extended(
+        limit=5000,
+        offset=0,
+    )
+    pre_scan_map: dict[str, EcosystemRepoProfile] = {
+        p.repo_full_name: p for p in pre_scan_profiles
+    }
+
+    # ── Step 3b: run scanner for each github data_source ─────────────────────
+    profile_def = profile.profile
+    active_def = profile_def.get("active_definition", {})
+    inactive_signals = profile_def.get("inactive_signals", {})
+    archive_signals = profile_def.get("archive_signals", {})
+    alert_thresholds = profile_def.get("alert_thresholds", {})
+
+    min_stars_by_source = active_def.get("min_popularity_floor", {})
+    active_top_n = active_def.get("active_top_n_per_source", 200)
+    inactive_no_activity_days = inactive_signals.get("no_activity_days", 180)
+    archive_no_activity_days = archive_signals.get("no_activity_days", 730)
+    max_new_per_scan = alert_thresholds.get("max_new_per_scan", 50)
+    max_archived_per_scan = alert_thresholds.get("max_archived_per_scan", 30)
+
+    # Collect all fresh repo dicts from all github sources (deduplicated by repo_full_name)
+    now = datetime.now(tz=timezone.utc)
+    all_fresh: dict[str, dict[str, Any]] = {}  # repo_full_name → repo_dict from scanner
+
+    for ds in active_sources:
+        if ds.kind.value != DataSourceKind.GITHUB.value:
+            continue  # only github fetcher implemented in P0
+        ds_config = ds.config or {}
+        raw_queries = ds_config.get("queries", [])
+        min_stars_gh = min_stars_by_source.get("github", 1000)
+
+        # Build EcosystemScanner query tuples from the data_source config.
+        # raw_queries contains strings like "topic:claude-code" or plain keywords.
+        scanner_queries: list[tuple[str, tuple[str, ...]]] = []
+        for q in raw_queries:
+            if q.startswith("topic:"):
+                topic = q[len("topic:"):]
+                scanner_queries.append(("", (topic,)))
+            else:
+                scanner_queries.append((q, ()))
+
+        if not scanner_queries:
+            # Fall back to DEFAULT_QUERIES when no queries are configured
+            from aiteam.services.ecosystem_scanner import DEFAULT_QUERIES
+            scanner_queries = list(DEFAULT_QUERIES)
+
+        if not body.dry_run:
+            # Real run: let scanner upsert into ecosystem_repo_profiles
+            filter_cfg = FilterConfig(min_stars=min_stars_gh)
+            scanner = EcosystemScanner(
+                repo=repo,
+                gh_search=default_gh_search,
+                config=filter_cfg,
+                project_id=project_id,
+            )
+            await scanner.scan(
+                strategy=EcosystemScanStrategy.FULL,
+                queries=tuple(scanner_queries),
+                triggered_by="index_update",
+            )
+
+        # Collect fresh repo list via gh_search (for both dry_run and real run).
+        # dry_run: this is the ONLY data collection path — scanner.scan is skipped.
+        # real run: scanner already upserted; we re-fetch to build all_fresh for diff.
+        for keyword, topics in scanner_queries:
+            try:
+                items = await default_gh_search(keyword, min_stars_gh, list(topics))
+                for item in items:
+                    fn = item.get("repo_full_name", "")
+                    if fn and fn not in all_fresh:
+                        all_fresh[fn] = item
+            except Exception:
+                pass
+
+    # ── Step 4+5: compute NormalizedSignal + classify active status ────────────
+    total = len(all_fresh)
+    # Sort by stars desc to assign ranks
+    sorted_repos = sorted(
+        all_fresh.items(),
+        key=lambda kv: kv[1].get("stars", 0),
+        reverse=True,
+    )
+
+    # repo_full_name → (rank, percentile, activity_score, computed_status)
+    fresh_signals: dict[str, tuple[int, float, float, str]] = {}
+    for rank_0, (fn, repo_data) in enumerate(sorted_repos):
+        rank = rank_0 + 1
+        percentile = 1.0 - (rank - 1) / max(total, 1)
+
+        pushed_at = repo_data.get("pushed_at")
+        if isinstance(pushed_at, str):
+            try:
+                pushed_at = datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
+            except ValueError:
+                pushed_at = None
+
+        if pushed_at is not None:
+            age_days = (now - (pushed_at if pushed_at.tzinfo else pushed_at.replace(tzinfo=timezone.utc))).days
+        else:
+            age_days = 9999
+
+        if age_days <= 30:
+            freshness = 1.0
+        elif age_days <= 90:
+            freshness = 0.7
+        elif age_days <= 365:
+            freshness = 0.4
+        else:
+            freshness = 0.1
+
+        activity_score = percentile * freshness
+
+        # Determine active_status
+        stars = repo_data.get("stars", 0)
+        min_floor = min_stars_by_source.get("github", 1000)
+        if stars < min_floor:
+            computed_status = "not_collected"
+        elif rank > active_top_n:
+            computed_status = "inactive"
+        elif age_days > archive_no_activity_days or repo_data.get("is_archived", False):
+            computed_status = "archived"
+        elif age_days > inactive_no_activity_days:
+            computed_status = "stale"
+        else:
+            computed_status = "active"
+
+        fresh_signals[fn] = (rank, percentile, activity_score, computed_status)
+
+    # ── Step 6: diff against DB ───────────────────────────────────────────────
+    # Use pre-scan snapshot (captured before scanner upserted new repos) for
+    # correct new/reactivated classification.
+    existing_map = pre_scan_map
+
+    new_repos: list[str] = []
+    reactivated_repos: list[str] = []
+    deactivated_repos: list[str] = []
+    stale_repos: list[str] = []
+    archived_repos: list[str] = []
+    status_changes: list[EcosystemStatusChange] = []
+    scan_run_id = None  # will be set from last scanner run if available
+
+    for fn, (rank, percentile, activity_score, computed_status) in fresh_signals.items():
+        if computed_status == "not_collected":
+            continue
+        existing = existing_map.get(fn)
+        prev_status = (existing.last_active_status if existing else None) if existing else None
+
+        if existing is None:
+            new_repos.append(fn)
+            if not body.dry_run:
+                # Lookup to get the repo_id after scanner upserted it
+                upserted = await repo.get_ecosystem_profile(fn, project_id=project_id)
+                if upserted:
+                    await repo.update_repo_active_status(
+                        upserted.id,
+                        new_status=computed_status,
+                        popularity_percentile=percentile,
+                        activity_score=activity_score,
+                        active_rank=rank,
+                    )
+                    status_changes.append(EcosystemStatusChange(
+                        repo_id=upserted.id,
+                        project_id=project_id,
+                        from_status=None,
+                        to_status=computed_status,
+                        reason="new_repo",
+                    ))
+        else:
+            repo_id = existing.id
+            if computed_status != prev_status and prev_status is not None:
+                if computed_status == "active" and prev_status in ("inactive", "stale"):
+                    reactivated_repos.append(fn)
+                    reason = "reactivated"
+                elif computed_status in ("inactive",) and prev_status == "active":
+                    deactivated_repos.append(fn)
+                    reason = "rank_drop"
+                elif computed_status == "stale":
+                    stale_repos.append(fn)
+                    reason = "no_activity"
+                elif computed_status == "archived":
+                    archived_repos.append(fn)
+                    reason = "archive_signals"
+                else:
+                    reason = "status_change"
+
+                if not body.dry_run:
+                    await repo.update_repo_active_status(
+                        repo_id,
+                        new_status=computed_status,
+                        popularity_percentile=percentile,
+                        activity_score=activity_score,
+                        active_rank=rank,
+                    )
+                    status_changes.append(EcosystemStatusChange(
+                        repo_id=repo_id,
+                        project_id=project_id,
+                        from_status=prev_status,
+                        to_status=computed_status,
+                        reason=reason,
+                    ))
+            else:
+                # Update signal fields even if status unchanged
+                if not body.dry_run:
+                    await repo.update_repo_active_status(
+                        repo_id,
+                        new_status=computed_status or "active",
+                        popularity_percentile=percentile,
+                        activity_score=activity_score,
+                        active_rank=rank,
+                    )
+
+    # Repos in DB but absent from fresh scan → deactivate
+    fresh_fn_set = set(fresh_signals.keys())
+    for fn, existing in existing_map.items():
+        if fn not in fresh_fn_set and existing.last_active_status != "inactive":
+            deactivated_repos.append(fn)
+            if not body.dry_run:
+                await repo.update_repo_active_status(
+                    existing.id,
+                    new_status="inactive",
+                )
+                status_changes.append(EcosystemStatusChange(
+                    repo_id=existing.id,
+                    project_id=project_id,
+                    from_status=existing.last_active_status,
+                    to_status="inactive",
+                    reason="missing_from_scan",
+                ))
+
+    # ── Step 7: check alert thresholds ────────────────────────────────────────
+    alerted = False
+    alert_message = ""
+    if len(new_repos) > max_new_per_scan:
+        alerted = True
+        alert_message = (
+            f"Alert: {len(new_repos)} new repos exceeds max_new_per_scan={max_new_per_scan}. "
+            "No changes committed. Adjust scan_profile or confirm via dry_run=False with raised threshold."
+        )
+    if len(archived_repos) > max_archived_per_scan:
+        alerted = True
+        alert_message = (
+            f"Alert: {len(archived_repos)} archived repos exceeds max_archived_per_scan={max_archived_per_scan}. "
+            "No changes committed. Review scan_profile archive_signals thresholds."
+        )
+
+    if alerted:
+        # Build diff summary without writing to DB
+        diff = EcosystemIndexDiff(
+            project_id=project_id,
+            diff_type="incremental",
+            new_count=len(new_repos),
+            reactivated_count=len(reactivated_repos),
+            deactivated_count=len(deactivated_repos),
+            stale_count=len(stale_repos),
+            archived_count=len(archived_repos),
+            details_json={
+                "new": new_repos[:50],
+                "reactivated": reactivated_repos[:50],
+                "deactivated": deactivated_repos[:50],
+                "stale": stale_repos[:50],
+                "archived": archived_repos[:50],
+            },
+            markdown_summary=alert_message,
+            alerted=True,
+        )
+        if not body.dry_run:
+            await repo.create_index_diff(diff)
+        return {
+            "success": True,  # call completed successfully; alerted=True signals threshold breach
+            "dry_run": body.dry_run,
+            "alerted": True,
+            "message": alert_message,
+            "diff": {
+                "new_count": diff.new_count,
+                "reactivated_count": diff.reactivated_count,
+                "deactivated_count": diff.deactivated_count,
+                "stale_count": diff.stale_count,
+                "archived_count": diff.archived_count,
+            },
+        }
+
+    # ── Step 8: persist diff + status changes (dry_run=False only) ────────────
+    markdown_summary = _build_diff_markdown(
+        new_repos=new_repos,
+        reactivated_repos=reactivated_repos,
+        deactivated_repos=deactivated_repos,
+        stale_repos=stale_repos,
+        archived_repos=archived_repos,
+        dry_run=body.dry_run,
+        total_scanned=total,
+        scan_profile_version=profile.version,
+    )
+
+    diff = EcosystemIndexDiff(
+        project_id=project_id,
+        diff_type="initial" if not existing_map else "incremental",
+        new_count=len(new_repos),
+        reactivated_count=len(reactivated_repos),
+        deactivated_count=len(deactivated_repos),
+        stale_count=len(stale_repos),
+        archived_count=len(archived_repos),
+        details_json={
+            "new": new_repos[:200],
+            "reactivated": reactivated_repos[:200],
+            "deactivated": deactivated_repos[:200],
+            "stale": stale_repos[:200],
+            "archived": archived_repos[:200],
+        },
+        markdown_summary=markdown_summary,
+        alerted=False,
+    )
+
+    if not body.dry_run:
+        await repo.create_index_diff(diff)
+        if status_changes:
+            await repo.bulk_create_status_changes(status_changes)
+
+    return {
+        "success": True,
+        "dry_run": body.dry_run,
+        "alerted": False,
+        "scan_profile_version": profile.version,
+        "total_scanned": total,
+        "diff": {
+            "id": diff.id,
+            "new_count": diff.new_count,
+            "reactivated_count": diff.reactivated_count,
+            "deactivated_count": diff.deactivated_count,
+            "stale_count": diff.stale_count,
+            "archived_count": diff.archived_count,
+            "markdown_summary": diff.markdown_summary,
+        },
+        "message": (
+            "Dry-run complete — no changes written." if body.dry_run
+            else f"Index updated: {diff.new_count} new, {diff.reactivated_count} reactivated, "
+                 f"{diff.deactivated_count} deactivated, {diff.stale_count} stale, {diff.archived_count} archived."
+        ),
+    }
+
+
+def _build_diff_markdown(
+    new_repos: list[str],
+    reactivated_repos: list[str],
+    deactivated_repos: list[str],
+    stale_repos: list[str],
+    archived_repos: list[str],
+    dry_run: bool,
+    total_scanned: int,
+    scan_profile_version: int,
+) -> str:
+    """Build a human-readable markdown summary of an index_update diff."""
+    mode = "Dry-run preview" if dry_run else "Index update"
+    lines = [
+        f"## {mode} — scan_profile v{scan_profile_version}",
+        f"",
+        f"Total repos scanned: **{total_scanned}**",
+        f"",
+        f"| Category | Count |",
+        f"|----------|-------|",
+        f"| New | {len(new_repos)} |",
+        f"| Reactivated | {len(reactivated_repos)} |",
+        f"| Deactivated | {len(deactivated_repos)} |",
+        f"| Stale | {len(stale_repos)} |",
+        f"| Archived | {len(archived_repos)} |",
+    ]
+    if new_repos:
+        lines += ["", "### New repos (first 10)"]
+        for fn in new_repos[:10]:
+            lines.append(f"- {fn}")
+    if deactivated_repos:
+        lines += ["", "### Deactivated repos (first 10)"]
+        for fn in deactivated_repos[:10]:
+            lines.append(f"- {fn}")
+    return "\n".join(lines)
+
+
+@router.get("/index_diffs/latest")
+async def get_latest_index_diff(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Return the most recent index diff for the current project."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    diff = await repo.get_latest_index_diff(project_id)
+    if diff is None:
+        return {"success": True, "diff": None, "message": "No index diffs found yet."}
+
+    return {
+        "success": True,
+        "diff": {
+            "id": diff.id,
+            "diff_type": diff.diff_type,
+            "new_count": diff.new_count,
+            "reactivated_count": diff.reactivated_count,
+            "deactivated_count": diff.deactivated_count,
+            "stale_count": diff.stale_count,
+            "archived_count": diff.archived_count,
+            "markdown_summary": diff.markdown_summary,
+            "alerted": diff.alerted,
+            "generated_at": diff.generated_at.isoformat(),
+        },
+    }
+
+
+@router.get("/index_diffs/history")
+async def get_index_diff_history(
+    limit: int = Query(default=10, ge=1, le=100),
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Return recent index diffs for the current project."""
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    diffs = await repo.list_index_diffs(project_id, limit=limit)
+    return {
+        "success": True,
+        "diffs": [
+            {
+                "id": d.id,
+                "diff_type": d.diff_type,
+                "new_count": d.new_count,
+                "reactivated_count": d.reactivated_count,
+                "deactivated_count": d.deactivated_count,
+                "stale_count": d.stale_count,
+                "archived_count": d.archived_count,
+                "alerted": d.alerted,
+                "generated_at": d.generated_at.isoformat(),
+            }
+            for d in diffs
+        ],
+        "total": len(diffs),
     }
