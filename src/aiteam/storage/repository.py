@@ -2208,6 +2208,9 @@ class StorageRepository:
                 row.is_archived = profile.is_archived
                 row.scan_run_id = profile.scan_run_id
                 row.description_excerpt = profile.description_excerpt or ""
+                # P1.C-1: persist discovered_via_queries when provided (union handled by scanner)
+                if profile.discovered_via_queries:
+                    row.discovered_via_queries = json.dumps(profile.discovered_via_queries)
 
     async def search_ecosystem_profiles(
         self,
@@ -4114,3 +4117,102 @@ class StorageRepository:
                 .values(**values)
             )
             return result.rowcount > 0
+
+    async def list_pinned_repos(
+        self,
+        project_id: str | None = None,
+        limit: int = 500,
+    ) -> tuple[list[EcosystemRepoProfile], int]:
+        """Return all repos with manual_status='pinned' for the given project."""
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.manual_status == "pinned"
+            )
+            if effective_pid is None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id.is_(None))
+            else:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id == effective_pid)
+            stmt = stmt.order_by(EcosystemRepoProfileModel.stars.desc()).limit(limit)
+            result = await session.execute(stmt)
+            rows = result.scalars().all()
+            profiles = [r.to_pydantic() for r in rows]
+            return profiles, len(profiles)
+
+    async def update_repo_discovered_queries(
+        self,
+        repo_id: str,
+        new_query: str,
+    ) -> bool:
+        """Union-append new_query into discovered_via_queries JSON array.
+
+        Idempotent: if new_query already present, no change is made.
+        Returns True if the row was found.
+        """
+        import json as _json
+        from sqlalchemy import update as sa_update
+
+        async with get_session(self._db_url) as session:
+            result = await session.execute(
+                select(EcosystemRepoProfileModel).where(
+                    EcosystemRepoProfileModel.id == repo_id
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            existing: list[str] = []
+            if row.discovered_via_queries:
+                try:
+                    existing = _json.loads(row.discovered_via_queries)
+                except Exception:
+                    existing = []
+            if new_query not in existing:
+                existing.append(new_query)
+                await session.execute(
+                    sa_update(EcosystemRepoProfileModel)
+                    .where(EcosystemRepoProfileModel.id == repo_id)
+                    .values(discovered_via_queries=_json.dumps(existing))
+                )
+            return True
+
+    async def update_repo_discovered_queries_by_name(
+        self,
+        repo_full_name: str,
+        new_query: str,
+        project_id: str | None = None,
+    ) -> bool:
+        """Union-append new_query into discovered_via_queries for a repo looked up by name.
+
+        Returns True if the row was found.
+        """
+        import json as _json
+        from sqlalchemy import update as sa_update
+
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemRepoProfileModel).where(
+                EcosystemRepoProfileModel.repo_full_name == repo_full_name
+            )
+            if effective_pid is None:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id.is_(None))
+            else:
+                stmt = stmt.where(EcosystemRepoProfileModel.project_id == effective_pid)
+            result = await session.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is None:
+                return False
+            existing: list[str] = []
+            if row.discovered_via_queries:
+                try:
+                    existing = _json.loads(row.discovered_via_queries)
+                except Exception:
+                    existing = []
+            if new_query not in existing:
+                existing.append(new_query)
+                await session.execute(
+                    sa_update(EcosystemRepoProfileModel)
+                    .where(EcosystemRepoProfileModel.id == row.id)
+                    .values(discovered_via_queries=_json.dumps(existing))
+                )
+            return True

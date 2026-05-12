@@ -157,6 +157,8 @@ COLUMNS_TO_ENSURE: list[tuple[str, str, str]] = [
     # v1.6.0-P1 hotfix: new semantically-correct columns for index_diffs schema
     ("ecosystem_index_diffs", "github_archived_changed_count", "INTEGER DEFAULT 0"),
     ("ecosystem_index_diffs", "removed_from_query_count", "INTEGER DEFAULT 0"),
+    # v1.6.0-P1.C-1: which search queries first/subsequently discovered this repo
+    ("ecosystem_repo_profiles", "discovered_via_queries", "TEXT DEFAULT NULL"),
 ]
 
 

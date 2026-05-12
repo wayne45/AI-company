@@ -542,10 +542,12 @@ class EcosystemRepoProfile(BaseModel):
     popularity_percentile: float | None = None  # 0-1, 1.0 = top of scan results
     activity_score: float | None = None  # 0-1 composite freshness * popularity
     # v1.6.0-P1.A: human-flagged manual status
-    manual_status: str | None = None  # 'no_value' | null
+    manual_status: str | None = None  # 'no_value' | 'pinned' | null
     manual_status_reason: str | None = None
     manual_status_set_at: datetime | None = None
     manual_status_set_by: str | None = None
+    # v1.6.0-P1.C-1: JSON array of query strings that discovered this repo
+    discovered_via_queries: list[str] = Field(default_factory=list)
 
 
 # ============================================================

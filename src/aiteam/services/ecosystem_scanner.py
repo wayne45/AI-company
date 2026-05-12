@@ -261,10 +261,19 @@ class EcosystemScanner:
         errors: list[str] = []
         per_query_stats: dict[str, int] = {}
         all_repos: dict[str, dict[str, Any]] = {}
+        # P1.C-1: track all queries that found each repo (repo_full_name → set of query strings)
+        repo_matched_queries: dict[str, list[str]] = {}
         active_queries = queries if queries is not None else DEFAULT_QUERIES
 
         for keyword, topics in active_queries:
             qkey = f"keyword={keyword!r} topics={list(topics)}"
+            # Build a compact human-readable query string for storage
+            if topics and keyword:
+                matched_query = f"{keyword} " + " ".join(f"topic:{t}" for t in topics)
+            elif topics:
+                matched_query = " ".join(f"topic:{t}" for t in topics)
+            else:
+                matched_query = keyword
             try:
                 items = await self._gh_search(keyword, self._config.min_stars, list(topics))
             except Exception as exc:  # graceful degradation — collect errors, keep going
@@ -277,10 +286,16 @@ class EcosystemScanner:
                 if not self._passes_filters(item):
                     continue
                 fn = item.get("repo_full_name", "")
-                if not fn or fn in all_repos:
+                if not fn:
                     continue
-                all_repos[fn] = item
-                count += 1
+                if fn not in all_repos:
+                    all_repos[fn] = item
+                    count += 1
+                # P1.C-1: record every query that hit this repo (union)
+                if fn not in repo_matched_queries:
+                    repo_matched_queries[fn] = []
+                if matched_query and matched_query not in repo_matched_queries[fn]:
+                    repo_matched_queries[fn].append(matched_query)
             per_query_stats[qkey] = count
 
         # Persist profiles — skip recently-scanned ones for incremental strategy
@@ -301,6 +316,14 @@ class EcosystemScanner:
                     and self._is_within_refresh_window(existing.last_scanned_at)
                 ):
                     skipped += 1
+                    # Still update discovered_via_queries for skipped repos
+                    for mq in repo_matched_queries.get(fn, []):
+                        try:
+                            await self._repo.update_repo_discovered_queries_by_name(
+                                fn, mq, project_id=self._project_id or None
+                            )
+                        except Exception:
+                            pass
                     continue
 
                 pushed_at = repo_data.get("pushed_at")
@@ -313,6 +336,17 @@ class EcosystemScanner:
                 profile = self._build_profile(repo_data, scan_run.id, is_archived, existing)
                 if self._project_id:
                     profile.project_id = self._project_id
+                # P1.C-1: pre-populate discovered_via_queries from this scan's matched queries
+                matched_qs = repo_matched_queries.get(fn, [])
+                if matched_qs:
+                    if existing and existing.discovered_via_queries:
+                        merged = list(existing.discovered_via_queries)
+                        for mq in matched_qs:
+                            if mq not in merged:
+                                merged.append(mq)
+                        profile.discovered_via_queries = merged
+                    else:
+                        profile.discovered_via_queries = list(matched_qs)
                 await self._repo.upsert_ecosystem_profile(
                     profile, project_id=self._project_id or None
                 )

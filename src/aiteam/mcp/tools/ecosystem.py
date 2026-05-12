@@ -1916,6 +1916,78 @@ def register(mcp: Any) -> None:
         return result
 
     @mcp.tool()
+    def ecosystem_rebuild_queries_from_repos(project_id: str = "") -> dict[str, Any]:
+        """Return a recap of all search queries that have discovered repos in this project.
+
+        Scans discovered_via_queries across all stored profiles and aggregates counts per query.
+        Useful to audit which queries are most productive and which repos are multi-query hits.
+
+        Args:
+            project_id: Optional project scope override.
+
+        Returns:
+            {queries: list[str], by_query: {query: count}, total_repos: N, repos_with_query_data: N}
+        """
+        result = _api_call(
+            "GET",
+            "/api/ecosystem/queries_recap",
+            extra_headers=_project_headers(project_id),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_pin_active(repo_id: str, reason: str = "", project_id: str = "") -> dict[str, Any]:
+        """Pin a repo to ensure it stays permanently active regardless of future scan results.
+
+        Pinned repos are excluded from the 'removed_from_query' count in index_update diffs
+        and their last_active_status is always 'active' even if the fetcher misses them.
+
+        Use this for high-value repos you want to track regardless of GitHub query hits.
+
+        Args:
+            repo_id: EcosystemRepoProfile.id of the target repo.
+            reason: Short explanation for pinning (stored for audit).
+            project_id: Optional project scope override.
+
+        Returns:
+            {success, repo_id, manual_status, reason, message}
+        """
+        result = _api_call(
+            "POST",
+            f"/api/ecosystem/repos/{repo_id}/manual_status",
+            {"status": "pinned", "reason": reason, "set_by": "ecosystem_pin_active"},
+            extra_headers=_project_headers(project_id),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
+    def ecosystem_unpin(repo_id: str, project_id: str = "") -> dict[str, Any]:
+        """Remove the pin from a repo (undo ecosystem_pin_active).
+
+        Equivalent to clearing manual_status — the repo reverts to normal scan-driven status.
+
+        Args:
+            repo_id: EcosystemRepoProfile.id of the target repo.
+            project_id: Optional project scope override.
+
+        Returns:
+            {success, repo_id, manual_status, message}
+        """
+        result = _api_call(
+            "POST",
+            f"/api/ecosystem/repos/{repo_id}/manual_status",
+            {"status": None, "reason": "", "set_by": "ecosystem_unpin"},
+            extra_headers=_project_headers(project_id),
+        )
+        if not result:
+            return {"success": False, "error": "api_unavailable"}
+        return result
+
+    @mcp.tool()
     def ecosystem_mark_no_value(repo_id: str, reason: str = "", project_id: str = "") -> dict[str, Any]:
         """Mark a repo as no_value (manual_archived) after deep review shows it has low value.
 

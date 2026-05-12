@@ -458,10 +458,13 @@ async def set_repo_manual_status(
     When status='no_value', the repo's last_active_status will reflect 'manual_archived'
     on the next index_update run.
     """
-    # Validate status value
-    allowed = {None, "no_value"}
+    # Validate status value — allowed: 'no_value', 'pinned', null
+    allowed = {None, "no_value", "pinned"}
     if body.status not in allowed:
-        raise HTTPException(status_code=400, detail=f"status must be one of: no_value, null. Got: {body.status!r}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of: no_value, pinned, null. Got: {body.status!r}",
+        )
 
     found = await repo.update_repo_manual_status(
         repo_id=repo_id,
@@ -472,9 +475,12 @@ async def set_repo_manual_status(
     if not found:
         raise HTTPException(status_code=404, detail=f"Repo {repo_id} not found")
 
-    # If setting no_value, also update last_active_status immediately
+    # Update last_active_status based on new manual_status
     if body.status == "no_value":
         await repo.update_repo_active_status(repo_id, new_status="manual_archived")
+    elif body.status == "pinned":
+        # pinned repos stay active — ensure last_active_status reflects this
+        await repo.update_repo_active_status(repo_id, new_status="active")
     elif body.status is None:
         # Clearing manual status — restore to 'active' unless github archived
         profile = await repo.get_ecosystem_profile_by_id(repo_id)
@@ -489,6 +495,7 @@ async def set_repo_manual_status(
         "set_by": body.set_by,
         "message": (
             f"Marked as no_value: {body.reason}" if body.status == "no_value"
+            else f"Pinned: {body.reason}" if body.status == "pinned"
             else "Manual status cleared"
         ),
     }
@@ -2520,6 +2527,8 @@ async def index_update(
                     # Determine effective status: manual_status takes priority
                     if upserted.manual_status == "no_value":
                         effective_status = "manual_archived"
+                    elif upserted.manual_status == "pinned":
+                        effective_status = "active"
                     else:
                         effective_status = computed_status
                     await repo.update_repo_active_status(upserted.id, new_status=effective_status)
@@ -2534,9 +2543,12 @@ async def index_update(
             updated_repos.append(fn)
             prev_status = existing.last_active_status
 
-            # Determine effective status
+            # Determine effective status: manual_status takes priority
             if existing.manual_status == "no_value":
                 effective_status = "manual_archived"
+            elif existing.manual_status == "pinned":
+                # Pinned repos stay active regardless of scan result
+                effective_status = "active"
             else:
                 effective_status = computed_status
 
@@ -2559,10 +2571,15 @@ async def index_update(
                     ))
 
     # Repos in DB but absent from this scan → preserve status permanently (P1.A)
+    # P1.C-2: pinned repos are excluded from removed_from_query count
     fresh_fn_set = set(fn for fn, s in fresh_statuses.items() if s != "not_collected")
     for fn, existing in existing_map.items():
         if fn not in fresh_fn_set:
-            removed_from_query.append(fn)
+            if existing.manual_status == "pinned":
+                # Pinned repos never count as removed — they stay active regardless
+                pass
+            else:
+                removed_from_query.append(fn)
             # No status change — repos are permanent once admitted
 
     # ── Step 6: check alert thresholds ────────────────────────────────────────
@@ -2769,4 +2786,63 @@ async def get_index_diff_history(
             for d in diffs
         ],
         "total": len(diffs),
+    }
+
+
+@router.get("/queries_recap")
+async def get_queries_recap(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """Return a recap of all search queries that have discovered repos in this project.
+
+    Scans discovered_via_queries across all profiles and aggregates counts.
+
+    Returns:
+        {queries: list[str], by_query: {query: count}, total_repos: N}
+    """
+    import json as _json
+
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    profiles, total_repos = await repo.search_ecosystem_profiles_extended(
+        limit=5000,
+        offset=0,
+    )
+
+    by_query: dict[str, int] = {}
+    for p in profiles:
+        for q in p.discovered_via_queries:
+            by_query[q] = by_query.get(q, 0) + 1
+
+    queries_sorted = sorted(by_query.keys(), key=lambda q: by_query[q], reverse=True)
+
+    return {
+        "success": True,
+        "queries": queries_sorted,
+        "by_query": by_query,
+        "total_repos": total_repos,
+        "repos_with_query_data": sum(1 for p in profiles if p.discovered_via_queries),
+    }
+
+
+@router.get("/repos/pinned")
+async def get_pinned_repos(
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """List all repos with manual_status='pinned' for the current project.
+
+    Pinned repos are permanently active regardless of scan results.
+    """
+    project_id = repo._project_scope
+    if not project_id:
+        raise HTTPException(status_code=400, detail="X-Project-Id header required")
+
+    profiles, total = await repo.list_pinned_repos()
+
+    return {
+        "success": True,
+        "pinned_repos": [_profile_to_list_dict(p) for p in profiles],
+        "total": total,
     }

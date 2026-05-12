@@ -1031,6 +1031,8 @@ class EcosystemRepoProfileModel(Base):
     manual_status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     manual_status_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     manual_status_set_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # v1.6.0-P1.C-1: JSON-serialized list of query strings
+    discovered_via_queries: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     def to_pydantic(self) -> EcosystemRepoProfile:
         """Convert to Pydantic model."""
@@ -1042,6 +1044,13 @@ class EcosystemRepoProfileModel(Base):
                 topics_list = json.loads(self.topics)
             except Exception:
                 topics_list = []
+
+        discovered_via_queries_list: list[str] = []
+        if self.discovered_via_queries:
+            try:
+                discovered_via_queries_list = json.loads(self.discovered_via_queries)
+            except Exception:
+                discovered_via_queries_list = []
 
         return EcosystemRepoProfile(
             id=self.id,
@@ -1083,6 +1092,7 @@ class EcosystemRepoProfileModel(Base):
             manual_status_reason=self.manual_status_reason,
             manual_status_set_at=self.manual_status_set_at,
             manual_status_set_by=self.manual_status_set_by,
+            discovered_via_queries=discovered_via_queries_list,
         )
 
     @classmethod
@@ -1130,6 +1140,7 @@ class EcosystemRepoProfileModel(Base):
             manual_status_reason=p.manual_status_reason,
             manual_status_set_at=p.manual_status_set_at,
             manual_status_set_by=p.manual_status_set_by,
+            discovered_via_queries=json.dumps(p.discovered_via_queries) if p.discovered_via_queries else None,
         )
 
 
