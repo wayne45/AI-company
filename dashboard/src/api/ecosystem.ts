@@ -120,6 +120,7 @@ export interface EcosystemProfilesResponse {
   total: number;
   limit?: number;
   offset?: number;
+  has_more?: boolean;
   facet_counts?: EcosystemFacetCounts;
 }
 
@@ -131,6 +132,7 @@ export interface EcosystemFilters {
   maxStars?: number;
   needsDeepReview?: boolean | null;
   limit?: number;
+  offset?: number;
   facetCounts?: boolean;
   // v1.5.0-E 新增：活跃/全量/已删除 tab + stage 维度筛选
   isActive?: boolean | null;
@@ -150,7 +152,8 @@ export function useEcosystemProfiles(filters: EcosystemFilters = {}) {
     minStars = 0,
     maxStars = 0,
     needsDeepReview = null,
-    limit = 200,
+    limit = 100,
+    offset = 0,
     facetCounts = false,
     isActive = null,
     isDeleted = null,
@@ -165,6 +168,7 @@ export function useEcosystemProfiles(filters: EcosystemFilters = {}) {
   if (maxStars > 0) params.set('max_stars', String(maxStars));
   if (needsDeepReview !== null) params.set('needs_deep_review', String(needsDeepReview));
   params.set('limit', String(limit));
+  if (offset > 0) params.set('offset', String(offset));
   if (facetCounts) params.set('facet_counts', 'true');
   if (isActive !== null) params.set('is_active', String(isActive));
   if (isDeleted !== null) params.set('is_deleted', String(isDeleted));
@@ -185,7 +189,7 @@ export function useEcosystemRepoDetail(repoId: string | null) {
     queryKey: ['ecosystem', 'repo', repoId],
     queryFn: async (): Promise<EcosystemRepoProfile | null> => {
       if (!repoId) return null;
-      const data = await apiFetch<EcosystemProfilesResponse>(`/api/ecosystem/profiles?limit=200`);
+      const data = await apiFetch<EcosystemProfilesResponse>(`/api/ecosystem/profiles?limit=100`);
       return data.profiles.find((p) => p.id === repoId) ?? null;
     },
     enabled: !!repoId,

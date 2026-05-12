@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, Boxes, Search as SearchIcon } from 'lucide-react';
+import { AlertCircle, Boxes, ChevronLeft, ChevronRight, Search as SearchIcon } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -19,20 +19,29 @@ type LifecycleTab = 'active' | 'all' | 'deleted';
  * 路径：/ecosystem
  * 数据源：GET /api/ecosystem/profiles?facet_counts=true&is_active=...&is_deleted=...
  */
+const PAGE_SIZE = 100;
+
 export function EcosystemListPage() {
   const { projectId, projectName } = useProject();
   const [tab, setTab] = useState<LifecycleTab>('active');
+  const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<EcosystemFilters>({
-    limit: 200,
+    limit: PAGE_SIZE,
     facetCounts: true,
   });
 
-  // 根据 tab 注入活跃/已删除参数
+  // tab / 筛选条件变化时重置到第 1 页（防止 page=3 但只剩 50 条空白）
+  useEffect(() => {
+    setPage(1);
+  }, [tab, filters]);
+
+  // 根据 tab 注入活跃/已删除参数 + 分页 offset
   const effectiveFilters = useMemo<EcosystemFilters>(() => {
-    if (tab === 'active') return { ...filters, isActive: true, isDeleted: false };
-    if (tab === 'deleted') return { ...filters, isDeleted: true };
-    return { ...filters }; // all: 不限定 active/deleted
-  }, [filters, tab]);
+    const base: EcosystemFilters = { ...filters, offset: (page - 1) * PAGE_SIZE };
+    if (tab === 'active') return { ...base, isActive: true, isDeleted: false };
+    if (tab === 'deleted') return { ...base, isDeleted: true };
+    return base; // all: 不限定 active/deleted
+  }, [filters, tab, page]);
 
   const { data, isLoading, error } = useEcosystemProfiles(effectiveFilters);
   const profiles = data?.profiles ?? [];
@@ -44,9 +53,9 @@ export function EcosystemListPage() {
     return profiles.filter(
       (p) =>
         p.repo_full_name.toLowerCase().includes(q) ||
-        p.owner.toLowerCase().includes(q) ||
+        (p.owner ?? '').toLowerCase().includes(q) ||
         p.name.toLowerCase().includes(q) ||
-        (p.description ?? '').toLowerCase().includes(q) ||
+        (p.description ?? p.description_excerpt ?? '').toLowerCase().includes(q) ||
         (p.one_line_summary ?? '').toLowerCase().includes(q),
     );
   }, [profiles, filters.keyword]);
@@ -171,11 +180,50 @@ export function EcosystemListPage() {
         )}
 
         {!isLoading && !error && filtered.length > 0 && (
-          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filtered.map((repo) => (
-              <RepoCard key={repo.id} repo={repo} />
-            ))}
-          </div>
+          <>
+            <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {filtered.map((repo) => (
+                <RepoCard key={repo.id} repo={repo} />
+              ))}
+            </div>
+
+            {/* 分页器：仅在总数超过单页时显示 */}
+            {(data?.total ?? 0) > PAGE_SIZE && (
+              <div className="flex items-center justify-between mt-4 pt-4 border-t">
+                <div className="text-sm text-muted-foreground">
+                  第 <span className="font-medium text-foreground">{(page - 1) * PAGE_SIZE + 1}</span>
+                  {' - '}
+                  <span className="font-medium text-foreground">
+                    {Math.min(page * PAGE_SIZE, data?.total ?? 0)}
+                  </span>
+                  {' '}/ 共 <span className="font-medium text-foreground">{data?.total ?? 0}</span> 仓
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                  >
+                    <ChevronLeft className="h-4 w-4 mr-1" aria-hidden="true" />
+                    上一页
+                  </Button>
+                  <span className="text-sm text-muted-foreground px-2">
+                    第 {page} / {Math.ceil((data?.total ?? 0) / PAGE_SIZE)} 页
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => p + 1)}
+                    disabled={!data?.has_more}
+                  >
+                    下一页
+                    <ChevronRight className="h-4 w-4 ml-1" aria-hidden="true" />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
