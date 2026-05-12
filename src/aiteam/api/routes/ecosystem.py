@@ -2877,6 +2877,9 @@ async def get_diff_period(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
 
+    if from_dt > to_dt:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
     events = await repo.query_events_in_period(project_id, from_dt, to_dt)
 
     by_type: dict[str, int] = {}
