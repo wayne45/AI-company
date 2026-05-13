@@ -195,6 +195,8 @@ def _profile_to_list_dict(
         "language": p.language,
         "topics": p.topics,
         "relevance_category": p.relevance_category,
+        # v1.6.0 SST: expose relevance_score so detail=false list doesn't show "undefined/10"
+        "relevance_score": p.relevance_score if p.relevance_score is not None else 0,
         "one_line_summary": p.one_line_summary,
         "description_excerpt": _make_summary_excerpt(p.description, 150),
         "is_archived": p.is_archived,
@@ -214,14 +216,17 @@ def _profile_to_list_dict(
 async def _build_stage_map(
     repo: StorageRepository,
     profile_ids: list[str],
+    shallow_summary_map: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, str], dict[str, int]]:
     """批量获取每个 profile 的 latest deep_review.stage_status + 研究次数。
 
     返回 (stage_map, count_map)：
-    - stage_map[repo_id] = "queued" / "shallow_done" / ...（latest deep_review，无则 "queued"）
+    - stage_map[repo_id] = "queued" / "shallow_done" / ...（latest deep_review，无则按
+      v1.6.0 SST 规则：有 shallow_summary -> "shallow_done"；否则 "queued"）
     - count_map[repo_id] = 该 repo 真正被研究过的次数（v1.5.2: 只数 architecture_done+ 的行，
       浅扫完成不计入 — 浅扫是预筛动作，不属于"被研究")
 
+    shallow_summary_map: {repo_id: shallow_summary} — 用于无 deep_review 时的 fallback。
     一次性查询所有 reviews（按 created_at desc），Python 端聚合，避免路由层 N+1。
     """
     # v1.5.2: "已被研究"的语义边界 — 进入 architecture stage 后才算
@@ -248,9 +253,14 @@ async def _build_stage_map(
         if r.repo_id not in stage_map:
             # list_deep_reviews 已按 created_at desc，第一条即 latest
             stage_map[r.repo_id] = stage_value or "queued"
-    # 兜底：没 review 的 profile 视作 queued
+    # v1.6.0 SST fallback: no deep_review → check shallow_summary before defaulting to "queued"
     for pid in profile_ids:
-        stage_map.setdefault(pid, "queued")
+        if pid not in stage_map:
+            summary = (shallow_summary_map or {}).get(pid)
+            if summary and summary.strip():
+                stage_map[pid] = "shallow_done"
+            else:
+                stage_map[pid] = "queued"
         count_map.setdefault(pid, 0)
     return stage_map, count_map
 
@@ -363,8 +373,8 @@ async def search_profiles(
     )
 
     # v1.5.0-E 客户端二次过滤：is_active / is_deleted
-    # v1.6.0 P1.A: is_active 语义化到 last_active_status（旧 is_active 字段已 deprecated）
-    # 兼容：last_active_status 缺失时 fallback 到旧 is_active 字段
+    # DEPRECATED v1.6.0 P1.A: is_active 字段已废弃，请用 last_active_status。
+    # 此参数保留仅作向后兼容，内部 fallback 到 last_active_status='active'。
     if is_active is not None:
         def _is_active(p):
             status = getattr(p, 'last_active_status', None)
@@ -376,7 +386,9 @@ async def search_profiles(
         profiles = [p for p in profiles if p.is_deleted == is_deleted]
 
     # v1.5.1: 一次性批量获取 stage_map + count_map（消除原 N+1 查询）
-    stage_map, count_map = await _build_stage_map(repo, [p.id for p in profiles])
+    # v1.6.0 SST: pass shallow_summary so repos with summary but no deep_review → "shallow_done"
+    _shallow_map = {p.id: p.shallow_summary for p in profiles}
+    stage_map, count_map = await _build_stage_map(repo, [p.id for p in profiles], _shallow_map)
 
     # stage_status 已在 SQL 层用 id_filter / id_exclude 完成；路由层不再后过滤
     if is_active is not None or is_deleted is not None:
@@ -777,8 +789,17 @@ def _serialize_full(payload: dict[str, Any]) -> dict[str, Any]:
     deep_reviews = payload.get("deep_reviews") or []
     scan_run = payload.get("scan_run")
 
+    # v1.6.0 SST: derive stage_status using same logic as list endpoint (_build_stage_map)
+    # 优先级: deep_review.stage_status > shallow_summary 非空 → 'shallow_done' > 'queued'
+    stage_status = "queued"
+    latest_dr = deep_reviews[0] if deep_reviews else None  # repository 返回应按时间倒序
+    if latest_dr and getattr(latest_dr, "stage_status", None):
+        stage_status = latest_dr.stage_status
+    elif profile.shallow_summary and profile.shallow_summary.strip():
+        stage_status = "shallow_done"
+
     serialized: dict[str, Any] = {
-        "profile": _profile_to_dict(profile),
+        "profile": _profile_to_dict(profile, stage_status=stage_status, research_count=len(deep_reviews)),
         "tags": payload.get("tags") or [],
         "deep_reviews": [_deep_review_to_dict(dr) for dr in deep_reviews],
         "relations_from": payload.get("relations_from") or [],

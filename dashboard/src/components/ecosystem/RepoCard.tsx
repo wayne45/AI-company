@@ -67,23 +67,9 @@ function categoryColor(category: string | null): string {
 }
 
 /**
- * 根据 profile 字段推断 stage（不查 deep_reviews 时的兜底）。
- * - is_deleted/is_private_now → shallow_failed (红)
- * - fetch_failure_count >= 3 → shallow_failed (红)
- * - shallow_summary 非空 → shallow_done (蓝)
- * - 其他 → queued (灰)
- */
-function inferStage(repo: EcosystemRepoProfile): string {
-  if (repo.is_deleted || repo.is_private_now) return 'shallow_failed';
-  if ((repo.fetch_failure_count ?? 0) >= 3) return 'shallow_failed';
-  if (repo.shallow_summary && repo.shallow_summary.trim().length > 0)
-    return 'shallow_done';
-  return 'queued';
-}
-
-/**
  * 单仓卡片 — 列表视图的基本单元。点击跳详情页。
  * v1.5.0-E: 加 stage 徽章 + failed 红色高亮 + 立即重试按钮。
+ * v1.6.0 SST: stage 完全由后端 stage_status 派生，前端不再做兜底推断。
  */
 export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
   const lastCommitDays = daysSince(repo.last_commit_at);
@@ -91,8 +77,8 @@ export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
   const summary =
     repo.shallow_summary || repo.one_line_summary || repo.description_excerpt || repo.description || '暂无描述';
 
-  // v1.5.1：优先用后端透出的 stage_status（latest deep_review），无则按 profile 字段推断
-  const stage = stageProp ?? repo.stage_status ?? inferStage(repo);
+  // v1.6.0 SST: 用后端透出的 stage_status；缺省默认 queued
+  const stage = stageProp ?? repo.stage_status ?? 'queued';
   const researchCount = repo.research_count ?? 0;
   const isFailed = stage.endsWith('_failed') || (repo.fetch_failure_count ?? 0) >= 3;
   const isDeleted = !!repo.is_deleted;

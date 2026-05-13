@@ -21,16 +21,7 @@ import {
   useLifecycleRequestBatch,
   STAGE_STATUS_LABELS,
   stageBadgeClass,
-  type EcosystemRepoProfile,
 } from '@/api/ecosystem';
-
-function inferStage(repo: EcosystemRepoProfile): string {
-  if (repo.is_deleted || repo.is_private_now) return 'shallow_failed';
-  if ((repo.fetch_failure_count ?? 0) >= 3) return 'shallow_failed';
-  if (repo.shallow_summary && repo.shallow_summary.trim().length > 0)
-    return 'shallow_done';
-  return 'queued';
-}
 
 /**
  * /ecosystem/research — 候选筛选页（v1.5.0-E §8.3）。
@@ -269,7 +260,7 @@ export function EcosystemResearchPage() {
             ) : (
               <div className="space-y-2">
                 {filteredCandidates.map((c) => {
-                  const stage = inferStage(c);
+                  const stage = c.stage_status ?? 'queued';
                   const checked = selectedIds.has(c.id);
                   return (
                     <button

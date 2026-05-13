@@ -3,7 +3,6 @@ import { Boxes, FileSearch, Archive, Tag, FolderOpen, Folder } from 'lucide-reac
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import type { EcosystemRepoProfile, EcosystemFacetCounts } from '@/api/ecosystem';
-import { CATEGORY_LABELS } from '@/api/ecosystem';
 import { useProject } from '@/context/ProjectContext';
 
 interface EcosystemStatsBarProps {
@@ -108,10 +107,11 @@ export function EcosystemStatsBar({
     return { totalCount, needsDeepCount, archivedCount, deepDoneCount, isFacetAvailable };
   }, [allProfiles, facetCounts, total]);
 
-  // Top 8 类别（按命中数量降序）— v1.6.0：扩到 8 占满整行；外层 flex-wrap 已开
-  const topCategories = useMemo(() => {
-    if (!facetCounts?.category) return [];
-    return Object.entries(facetCounts.category)
+  // v1.6.0 SST: Top 8 热门 topics（GitHub 原生 topics 维度，取代基于启发式的 category）
+  // 用 facet_counts.topics 全量统计，不被 limit 截断
+  const topTopics = useMemo(() => {
+    if (!facetCounts?.topics) return [];
+    return Object.entries(facetCounts.topics)
       .filter(([, n]) => n > 0)
       .sort(([, a], [, b]) => b - a)
       .slice(0, 8);
@@ -133,14 +133,14 @@ export function EcosystemStatsBar({
           )}
           {projectName ?? '全部项目'}
         </Badge>
-        {topCategories.length > 0 && (
+        {topTopics.length > 0 && (
           <>
-            <span className="text-xs text-muted-foreground ml-2">Top 类别:</span>
+            <span className="text-xs text-muted-foreground ml-2">热门 Topics:</span>
             <div className="flex items-center gap-1 flex-wrap">
-              {topCategories.map(([cat, n]) => (
-                <Badge key={cat} variant="secondary" className="text-[10px] gap-1">
+              {topTopics.map(([topic, n]) => (
+                <Badge key={topic} variant="secondary" className="text-[10px] gap-1">
                   <Tag className="h-2.5 w-2.5" aria-hidden="true" />
-                  {CATEGORY_LABELS[cat] ?? cat}
+                  {topic}
                   <span className="ml-0.5 opacity-70">{n}</span>
                 </Badge>
               ))}

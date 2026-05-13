@@ -25,7 +25,6 @@ import {
   useEcosystemRepoFull,
   useRetryFailedRepo,
   useRepoEvents,
-  CATEGORY_LABELS,
   DEEP_REVIEW_STATUS_LABELS,
   INTEGRATION_RECOMMENDATION_LABELS,
   STAGE_STATUS_LABELS,
@@ -303,15 +302,8 @@ export function EcosystemDetailPage() {
                 <CardContent className="space-y-2 text-sm">
                   <MetaRow label="拥有者" value={repo.owner} />
                   <MetaRow label="主语言" value={repo.language ?? '未识别'} icon={<Code2 className="h-3.5 w-3.5" />} />
-                  <MetaRow
-                    label="类别"
-                    value={
-                      repo.relevance_category
-                        ? (CATEGORY_LABELS[repo.relevance_category] ?? repo.relevance_category)
-                        : '未分类'
-                    }
-                    icon={<Tag className="h-3.5 w-3.5" />}
-                  />
+                  {/* v1.6.0 SST: 删除"类别"行 — relevance_category 启发式分类不可信，
+                      改由 GitHub topics 表达实际分类（详情页底部 topics 标签） */}
                   <MetaRow label="相关性评分" value={`${repo.relevance_score} / 10`} />
                   {repo.active_rank != null && (
                     <MetaRow label="活跃集排名" value={`#${repo.active_rank}`} />

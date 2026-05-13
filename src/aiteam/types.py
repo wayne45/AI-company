@@ -532,7 +532,7 @@ class EcosystemRepoProfile(BaseModel):
     is_private_now: bool = False  # GitHub 端仓被设私密（API 403 forbidden, not rate limit）
     last_fetch_error: str = ""  # 最近一次抓取错误的短消息
     fetch_failure_count: int = 0  # 累计失败次数
-    is_active: bool = True  # 是否在当前项目活跃集（top_n by stars，动态计算 + 缓存）
+    is_active: bool = True  # DEPRECATED v1.6.0 P1.A: 请用 last_active_status 代替。此字段仅向后兼容保留。
     active_rank: int | None = None  # 当前项目内排名（按 stars，None=不在 top_n）
     # v1.6.0-P0.4: NormalizedSignal fields (written by index_update)
     canonical_id: str | None = None  # "github/owner/repo" cross-source dedup key

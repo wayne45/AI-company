@@ -3282,11 +3282,35 @@ class StorageRepository:
                 stg2 = latest_stage_map.get(row[0], "queued")
                 stage_counts[stg2] = stage_counts.get(stg2, 0) + 1
 
+            # v1.6.0 SST: topics facet — full project (no filter beyond project_id)
+            # topics stored as JSON string; parse and count per-topic across all project repos
+            topics_q = select(EcosystemRepoProfileModel.topics)
+            if effective_pid is not None:
+                topics_q = topics_q.where(
+                    EcosystemRepoProfileModel.project_id == effective_pid
+                )
+            topics_result = await session.execute(topics_q)
+            topics_counter: dict[str, int] = {}
+            import json as _json
+            for (topics_raw,) in topics_result.all():
+                if not topics_raw:
+                    continue
+                try:
+                    topic_list = _json.loads(topics_raw) if isinstance(topics_raw, str) else topics_raw
+                    if isinstance(topic_list, list):
+                        for t in topic_list:
+                            if isinstance(t, str) and t:
+                                topics_counter[t] = topics_counter.get(t, 0) + 1
+                except Exception:
+                    pass
+            topics_sorted = dict(sorted(topics_counter.items(), key=lambda x: -x[1]))
+
             return {
                 "category": category_counts,
                 "language": language_counts,
                 "archived": archived_counts,
                 "stage": stage_counts,
+                "topics": topics_sorted,
             }
 
     async def get_ecosystem_profile_full(

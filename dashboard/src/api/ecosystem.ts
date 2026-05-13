@@ -31,7 +31,9 @@ export interface EcosystemRepoProfile {
   is_private_now?: boolean;
   last_fetch_error?: string;
   fetch_failure_count?: number;
+  /** @deprecated v1.6.0 P1.A: 使用 last_active_status 替代（'active' / 'archived' / 'manual_archived' / 'pinned'） */
   is_active?: boolean;
+  /** @deprecated v1.6.0 P1.A: 排名机制已废弃，使用 last_active_status + manual_status 表达活跃度 */
   active_rank?: number | null;
   // v1.5.1：透出渐进漏斗 stage 状态（取自 latest deep_review，无 review = "queued"）
   stage_status?: string | null;
@@ -115,6 +117,9 @@ export interface EcosystemFacetCounts {
   // v1.5.1：渐进漏斗 stage 分布（不被 limit 截断的全量统计）
   // 例如：{"queued": 162, "shallow_done": 100, "debated": 3}
   stage?: Record<string, number>;
+  // v1.6.0 SST: GitHub topics 维度全量统计（取代基于启发式的 category）
+  // 例如：{"mcp": 120, "claude-code": 80, "ai": 75, ...}
+  topics?: Record<string, number>;
 }
 
 export interface EcosystemProfilesResponse {
