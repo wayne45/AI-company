@@ -21,6 +21,8 @@ interface RepoCardProps {
   repo: EcosystemRepoProfile;
   /** 显式 stage（缺省时根据 profile 字段推断） */
   stage?: string;
+  /** 全局 topic 排名 map (来自 facet_counts.topics)，决定 topic badge 颜色位置 */
+  topicRankMap?: Record<string, number>;
 }
 
 /**
@@ -47,7 +49,7 @@ function daysSince(iso: string | null | undefined): number | null {
  * v1.5.0-E: 加 stage 徽章 + failed 红色高亮 + 立即重试按钮。
  * v1.6.0 SST: stage 完全由后端 stage_status 派生，前端不再做兜底推断。
  */
-export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
+export function RepoCard({ repo, stage: stageProp, topicRankMap }: RepoCardProps) {
   const lastCommitDays = daysSince(repo.last_commit_at);
   const isStale = lastCommitDays !== null && lastCommitDays > 180;
   const summary =
@@ -171,15 +173,19 @@ export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
           {/* 标签条：topics（v1.6.0：删除 relevance_category 启发式分类显示，颜色用 TOPIC_COLOR_PALETTE 按位置循环） */}
           {repo.topics && repo.topics.length > 0 && (
             <div className="flex flex-wrap items-center gap-1">
-              {repo.topics.slice(0, 4).map((topic, idx) => (
-                <Badge
-                  key={topic}
-                  variant="outline"
-                  className={`text-[10px] px-1.5 py-0 h-4 ${TOPIC_COLOR_PALETTE[idx % TOPIC_COLOR_PALETTE.length]}`}
-                >
-                  {topic}
-                </Badge>
-              ))}
+              {repo.topics.slice(0, 4).map((topic, idx) => {
+                // 优先用全局排名 (topicRankMap)，缺省 fallback 本地 idx
+                const globalIdx = topicRankMap?.[topic] ?? idx;
+                return (
+                  <Badge
+                    key={topic}
+                    variant="outline"
+                    className={`text-[10px] px-1.5 py-0 h-4 ${TOPIC_COLOR_PALETTE[globalIdx % TOPIC_COLOR_PALETTE.length]}`}
+                  >
+                    {topic}
+                  </Badge>
+                );
+              })}
               {repo.topics.length > 4 && (
                 <span className="text-[10px] text-muted-foreground">
                   +{repo.topics.length - 4}

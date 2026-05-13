@@ -71,6 +71,18 @@ export function EcosystemListPage() {
     });
   }, [profiles, filters.keyword, filters.topics]);
 
+  // v1.6.0: 全局 topic 排名 map (StatsBar + RepoCard 共享)
+  // 按 facet_counts.topics 排序后位置 → idx，让卡片标签颜色用全局 idx (不是卡片内部 idx)
+  const topicRankMap = useMemo<Record<string, number>>(() => {
+    const fc = data?.facet_counts?.topics ?? {};
+    return Object.entries(fc)
+      .sort(([, a], [, b]) => b - a)
+      .reduce<Record<string, number>>((acc, [topic], idx) => {
+        acc[topic] = idx;
+        return acc;
+      }, {});
+  }, [data?.facet_counts?.topics]);
+
   return (
     <div className="flex h-full flex-col">
       {/* 页头 */}
@@ -171,7 +183,7 @@ export function EcosystemListPage() {
           <>
             <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {filtered.map((repo) => (
-                <RepoCard key={repo.id} repo={repo} />
+                <RepoCard key={repo.id} repo={repo} topicRankMap={topicRankMap} />
               ))}
             </div>
 
