@@ -137,13 +137,28 @@ export function EcosystemStatsBar({
           <>
             <span className="text-xs text-muted-foreground ml-2">热门 Topics:</span>
             <div className="flex items-center gap-1 flex-wrap">
-              {topTopics.map(([topic, n]) => (
-                <Badge key={topic} variant="secondary" className="text-[10px] gap-1">
-                  <Tag className="h-2.5 w-2.5" aria-hidden="true" />
-                  {topic}
-                  <span className="ml-0.5 opacity-70">{n}</span>
-                </Badge>
-              ))}
+              {topTopics.map(([topic, n], idx) => {
+                // v1.6.0: top N tag 动态颜色，按位置循环分配（不硬编码 topic→color 映射）
+                // 位置变化（topic 排名升降）时自动换色
+                const palette = [
+                  'bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30',
+                  'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30',
+                  'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30',
+                  'bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30',
+                  'bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30',
+                  'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300 border-cyan-500/30',
+                  'bg-orange-500/10 text-orange-700 dark:text-orange-300 border-orange-500/30',
+                  'bg-pink-500/10 text-pink-700 dark:text-pink-300 border-pink-500/30',
+                ];
+                const colorClass = palette[idx % palette.length];
+                return (
+                  <Badge key={topic} variant="outline" className={`text-[10px] gap-1 ${colorClass}`}>
+                    <Tag className="h-2.5 w-2.5" aria-hidden="true" />
+                    {topic}
+                    <span className="ml-0.5 opacity-70">{n}</span>
+                  </Badge>
+                );
+              })}
             </div>
           </>
         )}

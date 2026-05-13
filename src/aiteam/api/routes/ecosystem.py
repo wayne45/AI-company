@@ -2938,17 +2938,36 @@ async def get_repo_scan_history(
         })
 
     for dr in deep_reviews:
+        # v1.6.0 修：跳过 v1.5 stage tracking 空占位 row（无任何实际内容仅记 stage='shallow_done'）
+        # 这些 row 是 v1.5 浅扫完成时自动创建的 stage 标记，非真深扫。265 老仓都有这种 row。
+        has_real_content = bool(
+            (dr.summary_md or "").strip()
+            or (dr.architecture_md or "").strip()
+            or (dr.risks_md or "").strip()
+            or (dr.learnings_md or "").strip()
+            or (dr.integration_md or "").strip()
+        )
+        if not has_real_content:
+            continue
+
         ts = (dr.completed_at or dr.created_at)
         stage_val = (
             dr.stage_status.value if hasattr(dr.stage_status, "value") else (dr.stage_status or "unknown")
         )
+        # v1.6.0 修: 根据 stage 区分浅扫/深扫语义，不再都叫"深扫"
+        # shallow_done 阶段（仅 summary_md 有内容）→ 浅扫记录
+        # architecture_done 及之后阶段（有 architecture_md 等）→ 深扫记录
+        is_deep = bool((dr.architecture_md or "").strip())
+        kind_label = "深扫" if is_deep else "浅扫"
+        entry_kind = "deep_review" if is_deep else "shallow_scan"
+
         entries.append({
-            "kind": "deep_review",
-            "type": f"deep_review_{stage_val}",
+            "kind": entry_kind,
+            "type": f"{entry_kind}_{stage_val}",
             "timestamp": ts.isoformat() if ts else dr.created_at.isoformat(),
             "stage_status": stage_val,
             "review_id": dr.id,
-            "summary": f"深扫 ({stage_val})",
+            "summary": f"{kind_label} ({stage_val})",
             "expandable_md": {
                 "summary": dr.summary_md or "",
                 "architecture": dr.architecture_md or "",
