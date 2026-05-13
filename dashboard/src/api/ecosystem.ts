@@ -474,6 +474,22 @@ export const RELEVANCE_CATEGORIES = [
 export type RelevanceCategory = (typeof RELEVANCE_CATEGORIES)[number];
 
 /**
+ * v1.6.0: Topic badge 动态颜色调色板 (StatsBar + RepoCard 共享).
+ * 按位置 idx % length 循环, top N 排名变化时颜色自动跟随位置.
+ * 用低饱和度 (secondary variant 基础 + 柔和边框/文字色), 保持简洁不刺眼.
+ */
+export const TOPIC_COLOR_PALETTE: readonly string[] = [
+  'border-blue-500/30 text-blue-700 dark:text-blue-300',
+  'border-emerald-500/30 text-emerald-700 dark:text-emerald-300',
+  'border-amber-500/30 text-amber-700 dark:text-amber-300',
+  'border-purple-500/30 text-purple-700 dark:text-purple-300',
+  'border-rose-500/30 text-rose-700 dark:text-rose-300',
+  'border-cyan-500/30 text-cyan-700 dark:text-cyan-300',
+  'border-orange-500/30 text-orange-700 dark:text-orange-300',
+  'border-pink-500/30 text-pink-700 dark:text-pink-300',
+] as const;
+
+/**
  * @deprecated v1.6.0 SST: relevance_category 启发式分类已废弃，UI 改用真实 GitHub topics。
  * 此映射保留仅作老数据回显兼容。新代码不应使用。
  */

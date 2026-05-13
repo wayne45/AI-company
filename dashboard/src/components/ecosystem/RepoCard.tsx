@@ -14,7 +14,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { EcosystemRepoProfile } from '@/api/ecosystem';
-import { useRetryFailedRepo } from '@/api/ecosystem';
+import { useRetryFailedRepo, TOPIC_COLOR_PALETTE } from '@/api/ecosystem';
 
 interface RepoCardProps {
   /** 仓档案数据 */
@@ -168,11 +168,15 @@ export function RepoCard({ repo, stage: stageProp }: RepoCardProps) {
             </div>
           )}
 
-          {/* 标签条：topics（v1.6.0：删除 relevance_category 启发式分类显示） */}
+          {/* 标签条：topics（v1.6.0：删除 relevance_category 启发式分类显示，颜色用 TOPIC_COLOR_PALETTE 按位置循环） */}
           {repo.topics && repo.topics.length > 0 && (
             <div className="flex flex-wrap items-center gap-1">
-              {repo.topics.slice(0, 4).map((topic) => (
-                <Badge key={topic} variant="outline" className="text-[10px] px-1.5 py-0 h-4">
+              {repo.topics.slice(0, 4).map((topic, idx) => (
+                <Badge
+                  key={topic}
+                  variant="outline"
+                  className={`text-[10px] px-1.5 py-0 h-4 ${TOPIC_COLOR_PALETTE[idx % TOPIC_COLOR_PALETTE.length]}`}
+                >
                   {topic}
                 </Badge>
               ))}
