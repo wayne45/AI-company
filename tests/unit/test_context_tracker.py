@@ -55,10 +55,10 @@ def _run_hook(payload: dict) -> tuple[str, int]:
 
 class TestContextTracker:
     def test_warning_at_80_percent(self):
-        # 200K context, 160K used -> 80%
+        # 1M context（默认），800K used -> 80% WARNING
         transcript = _make_transcript([
             {"message": {"role": "user", "content": "..."}},
-            {"message": {"role": "assistant", "usage": {"input_tokens": 160_000}, "model": "claude-opus-4-6"}},
+            {"message": {"role": "assistant", "usage": {"input_tokens": 800_000}, "model": "claude-opus-4-6"}},
         ])
         out, _ = _run_hook({"transcript_path": str(transcript)})
         assert "CONTEXT WARNING" in out
@@ -66,14 +66,16 @@ class TestContextTracker:
         transcript.unlink()
 
     def test_critical_at_90_percent(self):
+        # 1M context（默认），900K used -> 90% CRITICAL
         transcript = _make_transcript([
-            {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-opus-4-6"}},
+            {"message": {"role": "assistant", "usage": {"input_tokens": 900_000}, "model": "claude-opus-4-6"}},
         ])
         out, _ = _run_hook({"transcript_path": str(transcript)})
         assert "CONTEXT CRITICAL" in out
         transcript.unlink()
 
     def test_no_warning_below_80(self):
+        # 1M context（默认），100K used -> 10%，无警告
         transcript = _make_transcript([
             {"message": {"role": "assistant", "usage": {"input_tokens": 100_000}, "model": "claude-opus-4-6"}},
         ])
@@ -82,16 +84,16 @@ class TestContextTracker:
         transcript.unlink()
 
     def test_includes_cache_tokens(self):
-        # 200K context, 50K input + 120K cache_read = 170K total = 85%
+        # 1M context（默认），500K input + 360K cache_read = 860K total = 86%
         transcript = _make_transcript([
             {"message": {"role": "assistant", "usage": {
-                "input_tokens": 50_000,
-                "cache_read_input_tokens": 120_000,
+                "input_tokens": 500_000,
+                "cache_read_input_tokens": 360_000,
             }, "model": "claude-opus-4-6"}},
         ])
         out, _ = _run_hook({"transcript_path": str(transcript)})
         assert "CONTEXT WARNING" in out
-        assert "85" in out
+        assert "86" in out
         transcript.unlink()
 
     def test_1m_context_model(self):
@@ -113,8 +115,9 @@ class TestContextTracker:
         assert "342" not in out
         transcript.unlink()
 
-    def test_200k_critical_not_1m(self):
-        # 180K tokens + sonnet model -> should be 200K context -> 90% critical
+    def test_env_200k_critical(self, monkeypatch):
+        # ENV=200K 强制按 200K 算，180K -> 90% CRITICAL
+        monkeypatch.setenv("CLAUDE_CONTEXT_SIZE", "200000")
         transcript = _make_transcript([
             {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-sonnet-4-6"}},
         ])
@@ -123,13 +126,13 @@ class TestContextTracker:
         assert "200000" in out
         transcript.unlink()
 
-    def test_250k_tokens_auto_upgrade_to_1m(self):
-        # 250K tokens > 200K -> must be 1M -> 25% no warning
+    def test_default_1m_no_warning_for_170k(self):
+        # 默认 1M，170K tokens -> 17%，不触发警告（修复前 200K 默认会误报 85%）
         transcript = _make_transcript([
-            {"message": {"role": "assistant", "usage": {"input_tokens": 250_000}, "model": "claude-opus-4-6"}},
+            {"message": {"role": "assistant", "usage": {"input_tokens": 170_000}, "model": "claude-opus-4-7"}},
         ])
         out, _ = _run_hook({"transcript_path": str(transcript)})
-        assert out.strip() == ""
+        assert out.strip() == "", f"默认 1M 下 170K tokens 不应触发警告，实际输出：{out}"
         transcript.unlink()
 
     def test_missing_transcript_path(self):
@@ -141,9 +144,10 @@ class TestContextTracker:
         assert out.strip() == ""
 
     def test_malformed_jsonl_line_skipped(self):
+        # 1M context（默认），malformed 行被跳过，850K tokens -> 85% WARNING
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
         tmp.write("invalid json line\n")
-        tmp.write(json.dumps({"message": {"role": "assistant", "usage": {"input_tokens": 170_000}, "model": "claude-opus-4-6"}}) + "\n")
+        tmp.write(json.dumps({"message": {"role": "assistant", "usage": {"input_tokens": 850_000}, "model": "claude-opus-4-6"}}) + "\n")
         tmp.close()
         transcript = Path(tmp.name)
         out, _ = _run_hook({"transcript_path": str(transcript)})
@@ -174,17 +178,18 @@ class TestContextTracker:
         transcript.unlink()
 
     def test_no_cross_family_leak(self, monkeypatch, tmp_path):
-        """跨 family 不泄漏：config 只有 opus[1m]，sonnet 仍按 200K 算."""
+        """跨 family 不泄漏：config 只有 opus[1m]，sonnet family-level 检测不命中。
+        但 DEFAULT 仍为 1M，所以 180K tokens 按 1M 算 = 18%，无警告。
+        验证点：opus 的历史记录不会错误地通过 family fallback 影响 sonnet。"""
         fake_config = tmp_path / "claude.json"
         fake_config.write_text('{"models": {"claude-opus-4-6[1m]": {"x": 1}}}')
         monkeypatch.setattr(context_tracker, "_CLAUDE_CONFIG", fake_config)
-        # 180K + sonnet → 200K → 90% CRITICAL（不被 opus 1M 历史误触为 1M）
+        # 180K + sonnet + config 只有 opus[1m] → family fallback 不命中 → 默认 1M → 18% 无警告
         transcript = _make_transcript([
             {"message": {"role": "assistant", "usage": {"input_tokens": 180_000}, "model": "claude-sonnet-4-6"}},
         ])
         out, _ = _run_hook({"transcript_path": str(transcript)})
-        assert "CONTEXT CRITICAL" in out
-        assert "200000" in out
+        assert out.strip() == "", f"sonnet 不应被 opus family 泄漏触发警告：{out}"
         transcript.unlink()
 
     def test_env_var_override(self, monkeypatch):

@@ -15,7 +15,11 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_CONTEXT_SIZE = 200_000
+# 默认按 1M context window 计算。
+# 理由：Claude Code 全平台现已默认使用 1M window；
+# 误报偏低（漏警告）比误报偏高（频繁假警告打断工作）危害更小。
+# 如需强制按小 window（如 200K）计算，请设置 CLAUDE_CONTEXT_SIZE 环境变量。
+DEFAULT_CONTEXT_SIZE = 1_000_000
 LARGE_CONTEXT_SIZE = 1_000_000
 _CLAUDE_CONFIG = Path.home() / ".claude.json"
 _FAMILY_RE = re.compile(r"claude-(opus|sonnet|haiku)")
@@ -62,28 +66,33 @@ def _compute_used_pct(total_tokens: int, model: str) -> tuple[float, int]:
     """计算使用率 + 检测 context window 大小。
 
     优先级（高到低）：
-    1. **ENV var `CLAUDE_CONTEXT_SIZE`** — 用户终极覆盖（任意正整数 token 数）
-    2. **model 字串含 `1m` / `1000000`** → 1M
-    3. **~/.claude.json 有 `{model}[1m]` 或 同 family `*[1m]`** → 1M
-    4. **total_tokens > 200K** → 必然 1M（200K 装不下）
-    5. **默认** → 200K
+    1. **ENV var `CLAUDE_CONTEXT_SIZE`** — 用户终极覆盖（任意正整数 token 数）。
+       可用此项强制降级到小 window（如 CLAUDE_CONTEXT_SIZE=200000）。
+    2. **model 字串含 `1m` / `1000000`** → 1M（显式确认）
+    3. **~/.claude.json 有 `{model}[1m]` 或 同 family `*[1m]`** → 1M（历史用量推断）
+    4. **默认** → 1M（Claude Code 全平台现已默认 1M window；
+       误报偏低比频繁假警告打断工作危害更小）
     """
-    # 1. ENV var 终极覆盖
+    # 1. ENV var 终极覆盖（可用于强制按 200K 等小 window 计算）
     env_size = os.environ.get("CLAUDE_CONTEXT_SIZE", "").strip()
     if env_size.isdigit() and int(env_size) > 0:
         ctx_size = int(env_size)
         pct = round((total_tokens / ctx_size) * 100, 1)
         return pct, ctx_size
 
+    # 2. model 字串明确含 1m 标记
     ctx_size = DEFAULT_CONTEXT_SIZE
     if model:
         ml = model.lower()
         if "1m" in ml or "1000000" in ml:
             ctx_size = LARGE_CONTEXT_SIZE
+
+    # 3. ~/.claude.json 历史用量推断（同 family fallback）
     if ctx_size == DEFAULT_CONTEXT_SIZE and _claude_config_has_1m_variant(model):
         ctx_size = LARGE_CONTEXT_SIZE
-    if total_tokens > DEFAULT_CONTEXT_SIZE:
-        ctx_size = LARGE_CONTEXT_SIZE
+
+    # 4. 默认已是 1M（DEFAULT_CONTEXT_SIZE = 1_000_000），无需额外判断
+
     pct = round((total_tokens / ctx_size) * 100, 1)
     return pct, ctx_size
 

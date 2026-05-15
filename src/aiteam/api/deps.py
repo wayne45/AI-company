@@ -648,6 +648,10 @@ def get_scoped_repository(request: Request) -> StorageRepository:
     if not project_id:
         project_dir = request.headers.get("X-Project-Dir", "")
         if project_dir:
+            # Decode percent-encoding: MCP side encodes non-ASCII (e.g. Chinese
+            # path components) so the header stays latin-1 safe.
+            import urllib.parse as _up
+            project_dir = _up.unquote(project_dir)
             project_id = _resolve_project_id_from_dir(project_dir)
     if not project_id:
         return base_repo

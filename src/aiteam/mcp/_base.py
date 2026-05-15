@@ -74,7 +74,10 @@ def _api_call(
     url = f"{_get_api_url()}{urllib.parse.quote(path, safe='/?&=%')}"
     headers = {"Content-Type": "application/json"}
     if PROJECT_DIR:
-        headers["X-Project-Dir"] = PROJECT_DIR
+        # HTTP headers must be ASCII/latin-1; percent-encode the path so
+        # non-ASCII characters (e.g. Chinese directory names) are safe.
+        # The API side decodes with urllib.parse.unquote before path matching.
+        headers["X-Project-Dir"] = urllib.parse.quote(PROJECT_DIR, safe="/:.-_\\")
     # Stage J: auto-inject session-resolved X-Project-Id (read once at startup
     # via _init_session_project, no recursion risk). Subordinate to extra_headers
     # so callers can still override (e.g. cross-project tools force a different id).

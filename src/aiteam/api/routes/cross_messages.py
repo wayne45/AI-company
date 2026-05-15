@@ -24,14 +24,17 @@ router = APIRouter(prefix="/api/cross-messages", tags=["cross-messages"])
 def _resolve_project_id(x_project_dir: str) -> str:
     """Compute project_id from X-Project-Dir header.
 
+    The header value may be percent-encoded (MCP client encodes non-ASCII
+    path components to keep headers latin-1 safe); decode before hashing.
     Raises HTTP 400 if the header is missing.
     """
+    import urllib.parse as _up
     if not x_project_dir:
         raise HTTPException(
             status_code=400,
             detail="X-Project-Dir header is required for cross-project messaging",
         )
-    return compute_project_id(x_project_dir)
+    return compute_project_id(_up.unquote(x_project_dir))
 
 
 @router.post("/", response_model=APIResponse[CrossMessage], status_code=201)
@@ -45,10 +48,12 @@ async def send_cross_message(
     The sender's project_id is derived from the X-Project-Dir header.
     Set to_project_id=null to broadcast to all projects.
     """
+    import urllib.parse as _up
+    decoded_dir = _up.unquote(x_project_dir)
     from_project_id = _resolve_project_id(x_project_dir)
     msg = await repo.create_cross_message(
         from_project_id=from_project_id,
-        from_project_dir=x_project_dir,
+        from_project_dir=decoded_dir,
         to_project_id=payload.to_project_id or None,
         sender_name=payload.sender_name,
         content=payload.content,
