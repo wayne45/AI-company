@@ -1031,11 +1031,16 @@ class HookTranslator:
         if leaders_in_session:
             # Reuse existing session Leader
             leader = leaders_in_session[0]
-            await self.repo.update_agent(
-                leader.id,
-                status="busy",
-                last_active_at=datetime.now(),
-            )
+            update_kwargs: dict = {
+                "status": "busy",
+                "last_active_at": datetime.now(),
+            }
+            # Heal missing project binding — project liveness (summary "工作中")
+            # keys off leader.project_id, and session leaders created outside the
+            # branch below were left unbound (observed: 7 orphan Leader rows).
+            if project and not leader.project_id:
+                update_kwargs["project_id"] = project.id
+            await self.repo.update_agent(leader.id, **update_kwargs)
         elif project:
             # 3. Find existing Leader in project (may be an old Leader with empty session_id)
             project_leader = await self.repo.find_leader_by_project(project.id)
