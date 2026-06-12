@@ -1014,15 +1014,18 @@ class HookTranslator:
         cwd = payload.get("cwd", "")
         leader = None
 
-        # 1. Find project by cwd
+        # 1. Find project by cwd — longest root_path match. Several projects can
+        # prefix-match the same cwd (e.g. C:/Users/TUF vs C:/Users/TUF/Desktop/AI团队框架);
+        # first-match used to bind the Leader to the broader parent project by mistake.
         project = None
+        cwd_norm = cwd.replace("\\", "/").rstrip("/").lower()
+        best_len = -1
         projects = await self.repo.list_projects()
         for proj in projects:
-            if proj.root_path and cwd.replace("\\", "/").startswith(
-                proj.root_path.replace("\\", "/")
-            ):
+            rp = (proj.root_path or "").replace("\\", "/").rstrip("/").lower()
+            if rp and (cwd_norm == rp or cwd_norm.startswith(rp + "/")) and len(rp) > best_len:
                 project = proj
-                break
+                best_len = len(rp)
 
         # 2. Check if this session already has a Leader
         existing = await self.repo.find_agents_by_session(session_id)
@@ -1035,10 +1038,11 @@ class HookTranslator:
                 "status": "busy",
                 "last_active_at": datetime.now(),
             }
-            # Heal missing project binding — project liveness (summary "工作中")
-            # keys off leader.project_id, and session leaders created outside the
-            # branch below were left unbound (observed: 7 orphan Leader rows).
-            if project and not leader.project_id:
+            # Heal project binding — project liveness (summary "工作中") keys off
+            # leader.project_id. Session leaders were observed unbound (7 orphan
+            # rows) or bound to the wrong parent project (first-match bug above);
+            # a session has exactly one cwd, so the resolved project is authoritative.
+            if project and leader.project_id != project.id:
                 update_kwargs["project_id"] = project.id
             await self.repo.update_agent(leader.id, **update_kwargs)
         elif project:
