@@ -2,11 +2,20 @@
 
 Provides query interfaces for system automated rules and advisory rules,
 replacing verbose rule descriptions in CLAUDE.md.
+
+Also exposes a graceful self-shutdown endpoint used by the standardized
+restart flow (os_restart_api MCP tool).
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+
 from fastapi import APIRouter
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -390,3 +399,61 @@ async def get_rule(rule_id: str) -> dict:
             rule_type = "automated" if rule_id_upper.startswith("A") else "advisory"
             return {"rule": rule, "type": rule_type}
     return {"error": f"规则 {rule_id} 不存在"}
+
+
+def _wal_checkpoint_best_effort() -> None:
+    """Run a SQLite WAL checkpoint on the default DB before exit.
+
+    Best-effort only: any failure is logged and swallowed so it never blocks
+    the shutdown. Uses stdlib sqlite3 against the file path (synchronous) rather
+    than the async engine, since the event loop is being torn down at exit.
+    """
+    import sqlite3
+
+    from aiteam.storage.connection import DEFAULT_DB_URL
+
+    try:
+        # DEFAULT_DB_URL looks like "sqlite+aiosqlite:///<path>"
+        if "///" not in DEFAULT_DB_URL:
+            return
+        db_path = DEFAULT_DB_URL.split("///", 1)[-1]
+        if not db_path:
+            return
+        con = sqlite3.connect(db_path, timeout=5)
+        try:
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001 — checkpoint must never block exit
+        logger.warning("WAL checkpoint before shutdown failed (ignored): %s", exc)
+
+
+async def _delayed_exit() -> None:
+    """Wait briefly so the HTTP response is flushed, then hard-exit the process.
+
+    os._exit is used (not sys.exit) to guarantee the uvicorn worker actually
+    terminates and releases the port — sys.exit would only raise SystemExit
+    inside the request task and could be swallowed by the server.
+    """
+    await asyncio.sleep(0.5)
+    _wal_checkpoint_best_effort()
+    os._exit(0)
+
+
+@router.post("/shutdown")
+async def shutdown() -> dict:
+    """Gracefully shut down this API process.
+
+    Localhost-only by design: the API binds 127.0.0.1, so no external client can
+    reach this endpoint and no extra auth is required. It exists to give the
+    standardized restart flow (os_restart_api) a clean way to stop the old
+    process before a new version is spawned on the same port.
+
+    Returns immediately with the current PID, then self-exits ~0.5s later after a
+    best-effort WAL checkpoint.
+    """
+    pid = os.getpid()
+    logger.info("Graceful shutdown requested (pid=%d)", pid)
+    asyncio.create_task(_delayed_exit())
+    return {"success": True, "message": "shutting down", "pid": pid}
