@@ -1959,6 +1959,31 @@ async def cancel_shallow_batch(
     }
 
 
+@router.post("/shallow_batches/{batch_id}/rollback")
+async def rollback_shallow_batch(
+    batch_id: str,
+    repo: StorageRepository = Depends(get_scoped_repository),
+) -> dict[str, Any]:
+    """回滚批次 — approve 的逆操作。
+
+    删除该批次中尚未开工的浅扫任务行（stage_status='queued' 且未被认领），
+    已认领/已完成的行保留；批次置 cancelled。被移除的仓在下次创建批次时
+    会被重新发现（候选按"30 天未刷新"规则实时计算）。
+    """
+    batch = await repo.get_shallow_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="batch not found")
+    deleted = await repo.delete_unstarted_batch_reviews(batch_id)
+    await repo.update_shallow_batch(batch_id, status="cancelled")
+    return {
+        "success": True,
+        "batch_id": batch_id,
+        "deleted_queued": deleted,
+        "status": "cancelled",
+        "message": f"批次已回滚，移除 {deleted} 个未开工任务",
+    }
+
+
 def _batch_to_dict(b: Any) -> dict:
     """将 EcosystemShallowBatch 转为 JSON-safe dict。"""
     return {

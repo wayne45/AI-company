@@ -4088,6 +4088,29 @@ class StorageRepository:
             await session.flush()
             return row.to_pydantic()
 
+    async def delete_unstarted_batch_reviews(
+        self,
+        batch_id: str,
+        project_id: str | None = None,
+    ) -> int:
+        """删除批次中尚未开工的浅扫任务行（stage_status='queued' 且未被认领）。
+
+        已认领/已完成的行不动。approve 的逆操作，用于回滚不再执行的批次。
+        """
+        effective_pid = self._effective_project_id(project_id)
+        async with get_session(self._db_url) as session:
+            stmt = select(EcosystemDeepReviewModel).where(
+                EcosystemDeepReviewModel.batch_id == batch_id,
+                EcosystemDeepReviewModel.stage_status == "queued",
+                EcosystemDeepReviewModel.claimed_by.is_(None),
+            )
+            if effective_pid is not None:
+                stmt = stmt.where(EcosystemDeepReviewModel.project_id == effective_pid)
+            rows = (await session.execute(stmt)).scalars().all()
+            for row in rows:
+                await session.delete(row)
+            return len(rows)
+
     async def get_batch_items(
         self,
         batch_id: str,
