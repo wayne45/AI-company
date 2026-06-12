@@ -141,7 +141,7 @@ export const zh = {
     rootPathPlaceholder: '项目根目录路径（可选）',
     loadFailed: (msg: string) => `加载失败: ${msg}`,
     statusActive: '工作中',
-    statusInactive: '关闭',
+    statusInactive: '空闲',
     expandActiveTeams: (n: number) => `${n} 个活跃团队`,
     expandPendingTasks: (n: number) => `${n} 个待处理任务`,
     expandTopTasks: '待处理任务',

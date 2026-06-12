@@ -143,7 +143,7 @@ export const en: Translations = {
     rootPathPlaceholder: 'Project root directory path (optional)',
     loadFailed: (msg: string) => `Load failed: ${msg}`,
     statusActive: 'Active',
-    statusInactive: 'Inactive',
+    statusInactive: 'Idle',
     expandActiveTeams: (n: number) => `${n} active team${n !== 1 ? 's' : ''}`,
     expandPendingTasks: (n: number) => `${n} pending task${n !== 1 ? 's' : ''}`,
     expandTopTasks: 'Pending Tasks',
