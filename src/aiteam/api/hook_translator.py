@@ -833,11 +833,20 @@ class HookTranslator:
             # Self-heal: IDLE agent receives tool event -> correct to BUSY
             await self._self_heal_agent(target_agent)
 
-            # Update last active time
-            await self.repo.update_agent(
-                target_agent.id,
-                last_active_at=datetime.now(),
-            )
+            # Update last active time + heal missing project binding.
+            # Project binding used to happen only at SessionStart; a Leader created
+            # before its project was registered (or before cwd resolved) stayed
+            # project_id=None forever, so project liveness ("工作中") never saw it
+            # despite constant activity. Heal here so any tool call repairs it.
+            update_fields: dict = {"last_active_at": datetime.now()}
+            if (
+                getattr(target_agent, "role", None) == "leader"
+                and not getattr(target_agent, "project_id", None)
+            ):
+                healed_pid = await self._resolve_project_id_by_cwd(payload.get("cwd", ""))
+                if healed_pid:
+                    update_fields["project_id"] = healed_pid
+            await self.repo.update_agent(target_agent.id, **update_fields)
 
             start_time = datetime.now()
             activity = await self.repo.create_activity(
@@ -999,6 +1008,25 @@ class HookTranslator:
         )
         return {"status": "recorded"}
 
+    async def _resolve_project_id_by_cwd(self, cwd: str) -> str | None:
+        """Resolve project_id from a cwd via longest root_path prefix match.
+
+        Several projects can prefix-match the same cwd (e.g. C:/Users/TUF vs
+        C:/Users/TUF/Desktop/<proj>); the most specific (longest) wins. Returns
+        None when cwd is empty or matches no registered project.
+        """
+        cwd_norm = (cwd or "").replace("\\", "/").rstrip("/").lower()
+        if not cwd_norm:
+            return None
+        best_id: str | None = None
+        best_len = -1
+        for proj in await self.repo.list_projects():
+            rp = (proj.root_path or "").replace("\\", "/").rstrip("/").lower()
+            if rp and (cwd_norm == rp or cwd_norm.startswith(rp + "/")) and len(rp) > best_len:
+                best_id = proj.id
+                best_len = len(rp)
+        return best_id
+
     async def _on_session_start(self, payload: dict) -> dict:
         """Record CC session start.
 
@@ -1014,18 +1042,11 @@ class HookTranslator:
         cwd = payload.get("cwd", "")
         leader = None
 
-        # 1. Find project by cwd — longest root_path match. Several projects can
-        # prefix-match the same cwd (e.g. C:/Users/TUF vs C:/Users/TUF/Desktop/AI团队框架);
-        # first-match used to bind the Leader to the broader parent project by mistake.
+        # 1. Find project by cwd — longest root_path match (see helper).
         project = None
-        cwd_norm = cwd.replace("\\", "/").rstrip("/").lower()
-        best_len = -1
-        projects = await self.repo.list_projects()
-        for proj in projects:
-            rp = (proj.root_path or "").replace("\\", "/").rstrip("/").lower()
-            if rp and (cwd_norm == rp or cwd_norm.startswith(rp + "/")) and len(rp) > best_len:
-                project = proj
-                best_len = len(rp)
+        matched_pid = await self._resolve_project_id_by_cwd(cwd)
+        if matched_pid:
+            project = await self.repo.get_project(matched_pid)
 
         # 2. Check if this session already has a Leader
         existing = await self.repo.find_agents_by_session(session_id)
