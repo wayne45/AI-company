@@ -216,9 +216,12 @@ class StorageRepository:
                     | (CrossMessageModel.to_project_id == project_id)
                 )
             )
-            # Cascade: events for project teams
+            # Cascade: events for project teams (EventModel uses entity_id, not team_id)
             await session.execute(
-                delete(EventModel).where(EventModel.team_id.in_(team_ids_stmt))
+                delete(EventModel).where(EventModel.entity_id.in_(team_ids_stmt))
+            )
+            await session.execute(
+                delete(EventModel).where(EventModel.entity_id == project_id)
             )
             # Finally: delete project itself
             await session.execute(delete(ProjectModel).where(ProjectModel.id == project_id))

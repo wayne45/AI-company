@@ -161,6 +161,8 @@ async def run_task(
         "horizon": body.horizon,
         "tags": body.tags,
     }
+    if team.project_id:
+        create_kwargs["project_id"] = team.project_id
     if body.assigned_to:
         create_kwargs["assigned_to"] = body.assigned_to
     task = await repo.create_task(**create_kwargs)
