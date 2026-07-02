@@ -1,57 +1,57 @@
-# 开发机迁移指南（Windows → Mac / VS Code）
+# 開發機遷移指南（Windows → Mac / VS Code）
 
-把 AI Team OS 的开发环境从 Windows 迁到 Mac。代码本身全跨平台，**没有版本兼容问题**；
-要处理的只是「不随 git 走」的三样东西：未推送的提交、数据库、本机专属配置。
+把 AI Team OS 的開發環境從 Windows 遷到 Mac。代碼本身全跨平台，**沒有版本兼容問題**；
+要處理的只是「不隨 git 走」的三樣東西：未推送的提交、數據庫、本機專屬配置。
 
-## 跨平台现状（已核实）
+## 跨平台現狀（已核實）
 
-| 项 | 状态 |
+| 項 | 狀態 |
 |---|---|
-| Python | 要求 `>=3.11`（`pyproject.toml`），Mac 装 3.11+ 即可 |
+| Python | 要求 `>=3.11`（`pyproject.toml`），Mac 裝 3.11+ 即可 |
 | Plugin hooks | 全用 `${CLAUDE_PLUGIN_ROOT}` + `python`，完全可移植 |
-| API 自启动 `_autostart.py` | 已分别处理 win32 / unix（端口探测用 netstat/taskkill ↔ fuser/lsof/kill） |
-| `.mcp.json` 生成 | `install.py` 用 `sys.executable` 写入，Mac 上自动写 Mac 的 python 路径 |
+| API 自啟動 `_autostart.py` | 已分別處理 win32 / unix（端口探測用 netstat/taskkill ↔ fuser/lsof/kill） |
+| `.mcp.json` 生成 | `install.py` 用 `sys.executable` 寫入，Mac 上自動寫 Mac 的 python 路徑 |
 
-## 不随 git 走、必须手动处理的三样
+## 不隨 git 走、必須手動處理的三樣
 
-1. **未推送的提交** —— 换机前在旧机 `git push origin master`（否则 Mac clone 缺最新代码）。
-2. **数据库 `aiteam.db`** —— 在 `~/.claude/data/ai-team-os/aiteam.db`（约 76MB，**不在仓库**）。
-   要带现有团队 / 项目 / 任务数据，必须手动拷到 Mac 同路径。
-3. **本机专属配置** —— `.mcp.json` 和 `.claude/settings.json` 都被 `.gitignore`，不随仓库：
-   - `.mcp.json`：`install.py` 在 Mac 会重新生成（正确的 Mac python 路径），无需手动。
-   - `.claude/settings.json`：里面那个 `pwsh + inject-context.ps1` 钩子是 **Windows 专属**，
-     Mac 上要么不用，要么换成 bash/python 等价实现。
+1. **未推送的提交** —— 換機前在舊機 `git push origin master`（否則 Mac clone 缺最新代碼）。
+2. **數據庫 `aiteam.db`** —— 在 `~/.claude/data/ai-team-os/aiteam.db`（約 76MB，**不在倉庫**）。
+   要帶現有團隊 / 項目 / 任務數據，必須手動拷到 Mac 同路徑。
+3. **本機專屬配置** —— `.mcp.json` 和 `.claude/settings.json` 都被 `.gitignore`，不隨倉庫：
+    - `.mcp.json`：`install.py` 在 Mac 會重新生成（正確的 Mac python 路徑），無需手動。
+    - `.claude/settings.json`：里面那個 `pwsh + inject-context.ps1` 鉤子是 **Windows 專屬**，
+      Mac 上要麼不用，要麼換成 bash/python 等價實現。
 
-## Mac 上的步骤
+## Mac 上的步驟
 
 ```bash
-# 0)（在旧 Windows 机）先推送，确保 GitHub 有最新代码
+# 0)（在舊 Windows 機）先推送，確保 GitHub 有最新代碼
 git push origin master
 
-# 1)（Mac）克隆并安装 Python 包（需 Python 3.11+）
+# 1)（Mac）克隆並安裝 Python 包（需 Python 3.11+）
 git clone https://github.com/CronusL-1141/AI-company.git
-cd AI-company          # 仓库目录
+cd AI-company          # 倉庫目錄
 pip install -e .
 
-# 2) 安装前端依赖并构建
+# 2) 安裝前端依賴並構建
 cd dashboard && npm install && npm run build && cd ..
 
-# 3) 注册 MCP + hooks（自动生成 Mac 版 .mcp.json）
+# 3) 注冊 MCP + hooks（自動生成 Mac 版 .mcp.json）
 python install.py
 
-# 4)（可选，要保留现有数据）从旧机拷数据库到 Mac
-#    旧机文件： ~/.claude/data/ai-team-os/aiteam.db
+# 4)（可選，要保留現有數據）從舊機拷數據庫到 Mac
+#    舊機文件： ~/.claude/data/ai-team-os/aiteam.db
 mkdir -p ~/.claude/data/ai-team-os
 cp /path/to/aiteam.db ~/.claude/data/ai-team-os/aiteam.db
 
-# 5)（可选，要用 Playwright 截图/E2E）
+# 5)（可選，要用 Playwright 截圖/E2E）
 pip install playwright && playwright install
 ```
 
-VS Code：装 Python 扩展即可，无其它特殊要求。
+VS Code：裝 Python 擴展即可，無其它特殊要求。
 
 ## 注意
 
-- **换行符**：仓库走 autocrlf，Mac 用 LF，无功能影响。
-- **`dashboard/dist`**：构建产物，Mac 上需重新 `npm run build`（`.gitignore` 已忽略其 JS/CSS）。
-- **数据隔离**：不拷 `aiteam.db` 的话，Mac 是一套全新空库（团队/项目/任务从零开始）。
+- **換行符**：倉庫走 autocrlf，Mac 用 LF，無功能影響。
+- **`dashboard/dist`**：構建產物，Mac 上需重新 `npm run build`（`.gitignore` 已忽略其 JS/CSS）。
+- **數據隔離**：不拷 `aiteam.db` 的話，Mac 是一套全新空庫（團隊/項目/任務從零開始）。
