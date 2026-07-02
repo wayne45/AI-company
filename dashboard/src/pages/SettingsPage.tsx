@@ -265,7 +265,8 @@ export function SettingsPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="zh">中文</SelectItem>
+                    <SelectItem value="zh">简体中文</SelectItem>
+                    <SelectItem value="zh-TW">繁體中文</SelectItem>
                     <SelectItem value="en">English</SelectItem>
                   </SelectContent>
                 </Select>

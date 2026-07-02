@@ -1,19 +1,19 @@
 import { useState, useCallback, createContext, useContext } from 'react';
 import { zh } from './zh';
+import { zhTW } from './zh-tw';
 import { en } from './en';
 
-const langs = { zh, en } as const;
-export type Lang = keyof typeof langs;
+const langs: Record<string, typeof zh> = { zh, 'zh-TW': zhTW, en };
+export type Lang = 'zh' | 'zh-TW' | 'en';
 export type { Translations } from './zh';
 
 function detectLang(): Lang {
-  // 1. 用户手动设置过的优先
   const stored = localStorage.getItem('lang') as Lang;
   if (stored && stored in langs) return stored;
-  // 2. 检测浏览器语言
   const browserLang = navigator.language?.toLowerCase() || '';
+  if (browserLang.startsWith('zh-tw') || browserLang.startsWith('zh-hant')) return 'zh-TW';
   if (browserLang.startsWith('zh')) return 'zh';
-  return 'en'; // 默认英文
+  return 'en';
 }
 
 export function useLanguage() {
