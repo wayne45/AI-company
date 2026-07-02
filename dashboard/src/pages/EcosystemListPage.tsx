@@ -11,6 +11,7 @@ import { EcosystemStatsBar } from '@/components/ecosystem/EcosystemStatsBar';
 import { RecentScanRunsBar } from '@/components/ecosystem/RecentScanRunsBar';
 import { EcosystemProjectFilter } from '@/components/ecosystem/EcosystemProjectFilter';
 import { useProject } from '@/context/ProjectContext';
+import { useT } from '@/i18n';
 
 /**
  * Ecosystem 列表页 — v1.6.0：取消失活筛选，所有库永久参与搜索。
@@ -24,6 +25,7 @@ import { useProject } from '@/context/ProjectContext';
 const PAGE_SIZE = 100;
 
 export function EcosystemListPage() {
+  const t = useT();
   const { projectId, projectName } = useProject();
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<EcosystemFilters>({
@@ -93,19 +95,19 @@ export function EcosystemListPage() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <Boxes className="h-5 w-5 text-primary" aria-hidden="true" />
-              <h1 className="text-xl font-semibold">生态仓档案</h1>
+              <h1 className="text-xl font-semibold">{t.ecosystem.title}</h1>
             </div>
             <p className="text-sm text-muted-foreground mt-1">
-              Claude Agent / MCP / Memory / Skill 等开源仓的广索引视图。点击卡片进入详情。
+              {t.ecosystem.subtitle}
               {projectName && (
                 <>
-                  {' '}当前已按项目 <span className="text-primary font-medium">{projectName}</span> 过滤。
+                  {' '}{t.ecosystem.filteredByProject(projectName)}
                 </>
               )}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <span className="text-xs text-muted-foreground">生态库项目</span>
+            <span className="text-xs text-muted-foreground">{t.ecosystem.projectLabel}</span>
             <EcosystemProjectFilter />
             <Button
               variant="outline"
@@ -115,7 +117,7 @@ export function EcosystemListPage() {
               render={<Link to="/ecosystem/batches" />}
             >
               <Layers className="mr-1 h-4 w-4" aria-hidden="true" />
-              浅扫批次
+              {t.ecosystem.batchScan}
             </Button>
           </div>
           <Button
@@ -126,7 +128,7 @@ export function EcosystemListPage() {
             render={<Link to="/ecosystem/research" />}
           >
             <SearchIcon className="mr-1 h-4 w-4" aria-hidden="true" />
-            查找候选
+            {t.ecosystem.searchCandidates}
           </Button>
         </div>
       </div>
@@ -168,12 +170,12 @@ export function EcosystemListPage() {
           >
             <AlertCircle className="h-5 w-5 mt-0.5 shrink-0" aria-hidden="true" />
             <div className="text-sm">
-              <p className="font-medium">加载生态档案失败</p>
+              <p className="font-medium">{t.ecosystem.loadFailed}</p>
               <p className="mt-1 text-xs opacity-80">
                 {error.message}
                 {error.message.includes('Not Found') && (
                   <span className="block mt-1">
-                    提示：API server 可能尚未注册 /api/ecosystem 路由，请确认后端已重启。
+                    {t.ecosystem.loadFailedHint}
                   </span>
                 )}
               </p>
@@ -184,13 +186,13 @@ export function EcosystemListPage() {
         {!isLoading && !error && filtered.length === 0 && (
           <div className="flex flex-col items-center justify-center h-64 text-center text-muted-foreground">
             <Boxes className="h-10 w-10 opacity-30 mb-2" aria-hidden="true" />
-            <p className="text-sm">暂无匹配的仓库</p>
+            <p className="text-sm">{t.ecosystem.noMatch}</p>
             <p className="text-xs mt-1">
               {filters.keyword || filters.category || filters.minStars
-                ? '调整筛选条件或清除过滤试试'
+                ? t.ecosystem.noMatchHintFilter
                 : projectId
-                  ? '当前项目下尚无生态仓档案，可切换到「全部项目」或运行扫描任务后填充'
-                  : '运行扫描任务后将填充档案'}
+                  ? t.ecosystem.noMatchHintProject
+                  : t.ecosystem.noMatchHintEmpty}
             </p>
           </div>
         )}
@@ -207,12 +209,7 @@ export function EcosystemListPage() {
             {(data?.total ?? 0) > PAGE_SIZE && (
               <div className="flex items-center justify-between mt-4 pt-4 border-t">
                 <div className="text-sm text-muted-foreground">
-                  第 <span className="font-medium text-foreground">{(page - 1) * PAGE_SIZE + 1}</span>
-                  {' - '}
-                  <span className="font-medium text-foreground">
-                    {Math.min(page * PAGE_SIZE, data?.total ?? 0)}
-                  </span>
-                  {' '}/ 共 <span className="font-medium text-foreground">{data?.total ?? 0}</span> 仓
+                  {t.ecosystem.pageInfo((page - 1) * PAGE_SIZE + 1, Math.min(page * PAGE_SIZE, data?.total ?? 0), data?.total ?? 0)}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -222,10 +219,10 @@ export function EcosystemListPage() {
                     disabled={page === 1}
                   >
                     <ChevronLeft className="h-4 w-4 mr-1" aria-hidden="true" />
-                    上一页
+                    {t.ecosystem.prevPage}
                   </Button>
                   <span className="text-sm text-muted-foreground px-2">
-                    第 {page} / {Math.ceil((data?.total ?? 0) / PAGE_SIZE)} 页
+                    {t.ecosystem.pageOf(page, Math.ceil((data?.total ?? 0) / PAGE_SIZE))}
                   </span>
                   <Button
                     variant="outline"
@@ -233,7 +230,7 @@ export function EcosystemListPage() {
                     onClick={() => setPage((p) => p + 1)}
                     disabled={!data?.has_more}
                   >
-                    下一页
+                    {t.ecosystem.nextPage}
                     <ChevronRight className="h-4 w-4 ml-1" aria-hidden="true" />
                   </Button>
                 </div>
